@@ -17,12 +17,9 @@ RUN apt-get install -y git build-essential curl wget ffmpeg unzip git git-lfs so
 # conda install and conda forge channel as default
 # ------------------------------------------------------------------
 # Install miniforge
-# 使用固定版本号避免检查latest，添加超时和重试机制，显示下载进度
-RUN MINIFORGE_VERSION="24.1.2-3" && \
-    wget --timeout=60 --tries=3 --progress=bar:force:noscroll \
-    https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_VERSION}/Miniforge3-${MINIFORGE_VERSION}-Linux-x86_64.sh -O ~/miniforge.sh || \
-    wget --timeout=60 --tries=3 --progress=bar:force:noscroll \
-    https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O ~/miniforge.sh && \
+# 使用清华大学镜像源加速下载
+RUN wget --timeout=60 --tries=3 --progress=bar:force:noscroll \
+    https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniforge.sh && \
     /bin/bash ~/miniforge.sh -b -p /opt/conda && \
     rm ~/miniforge.sh && \
     ln -s /opt/conda/etc/profile.d/conda.sh /etc/profile.d/conda.sh && \
@@ -33,8 +30,13 @@ RUN MINIFORGE_VERSION="24.1.2-3" && \
 
 ENV PATH /opt/conda/bin:$PATH
 
+# 配置 conda 使用清华大学镜像源加速
 RUN conda config --add channels conda-forge && \
-    conda config --set channel_priority strict
+    conda config --set channel_priority strict && \
+    conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main && \
+    conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/free && \
+    conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge && \
+    conda config --set show_channel_urls yes
 # ------------------------------------------------------------------
 # ~conda
 # ==================================================================
