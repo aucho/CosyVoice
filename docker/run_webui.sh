@@ -260,13 +260,23 @@ echo "  停止单个:     docker stop ${CONTAINER_NAME_PREFIX}-<端口>"
 echo "=========================================="
 echo ""
 
-# 等待几秒后显示第一个容器的日志
+# 等待几秒后显示所有成功启动容器的最后几行日志
 if [ ${SUCCESS_COUNT} -gt 0 ]; then
     sleep 3
-    first_port=${PORTS[0]}
-    first_container="${CONTAINER_NAME_PREFIX}-${first_port}"
-    print_info "显示容器 ${first_container} 的日志（按 Ctrl+C 退出日志查看，容器将继续运行）..."
+    print_info "显示所有容器的启动日志（最后 20 行）..."
     echo ""
-    docker logs -f ${first_container}
+    for port in "${PORTS[@]}"; do
+        container_name="${CONTAINER_NAME_PREFIX}-${port}"
+        if docker ps | grep -q "${container_name}"; then
+            echo "----------------------------------------"
+            echo "容器 ${container_name} 的日志:"
+            echo "----------------------------------------"
+            docker logs --tail 20 ${container_name} 2>&1
+            echo ""
+        fi
+    done
+    echo ""
+    print_info "所有容器已启动，可以使用以下命令查看实时日志："
+    echo "  docker logs -f ${CONTAINER_NAME_PREFIX}-<端口>"
 fi
 
