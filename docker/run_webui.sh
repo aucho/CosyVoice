@@ -115,10 +115,10 @@ print_success "Docker 环境检查通过"
 print_info "检查 GPU 支持..."
 if docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi &> /dev/null; then
     GPU_FLAG="--gpus all"
-    print_success "检测到 GPU 支持"
+    print_success "检测到 GPU 支持，将启用 GPU"
 else
-    GPU_FLAG=""
-    print_warning "未检测到 GPU 支持，将使用 CPU 运行（性能较差）"
+    GPU_FLAG="--gpus all"
+    print_warning "GPU 检测失败，但仍将尝试启用 GPU（如果失败将回退到 CPU）"
 fi
 
 # 检查镜像是否存在
@@ -185,10 +185,10 @@ for port in "${PORTS[@]}"; do
     container_name="${CONTAINER_NAME_PREFIX}-${port}"
     print_info "启动容器 ${container_name} (端口 ${port})..."
     
-    # 启动容器
+    # 启动容器（启用端口映射和GPU支持）
     if docker run -d \
         ${GPU_FLAG} \
-        -p ${port}:8000 \
+        -p ${port}:${port} \
         -v "$MODEL_PATH:/workspace/CosyVoice/pretrained_models" \
         --name ${container_name} \
         --restart unless-stopped \
@@ -205,7 +205,7 @@ for port in "${PORTS[@]}"; do
                      cd /workspace/CosyVoice; \
                  fi && \
                  python webui.py \
-                     --port 8000 \
+                     --port ${port} \
                      --model_dir ${MODEL_DIR} \
                      --max_concurrent ${MAX_CONCURRENT} \
                      --max_queue_size ${MAX_QUEUE_SIZE}" &> /dev/null; then
