@@ -196,6 +196,14 @@ for port in "${PORTS[@]}"; do
         bash -c "source /opt/conda/etc/profile.d/conda.sh && \
                  conda activate cosyvoice && \
                  cd /workspace/CosyVoice && \
+                 if [ -d 'pretrained_models/CosyVoice-ttsfrd' ] && [ -f 'pretrained_models/CosyVoice-ttsfrd/resource.zip' ] && [ ! -f 'pretrained_models/CosyVoice-ttsfrd/ttsfrd-0.4.2-cp310-cp310-linux_x86_64.whl' ]; then \
+                     echo '安装 ttsfrd...' && \
+                     cd pretrained_models/CosyVoice-ttsfrd && \
+                     unzip -q resource.zip -d . && \
+                     pip install ttsfrd_dependency-0.1-py3-none-any.whl && \
+                     pip install ttsfrd-0.4.2-cp310-cp310-linux_x86_64.whl && \
+                     cd /workspace/CosyVoice; \
+                 fi && \
                  python webui.py \
                      --port 8000 \
                      --model_dir ${MODEL_DIR} \
