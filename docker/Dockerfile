@@ -28,14 +28,13 @@ RUN wget --timeout=60 --tries=3 --progress=bar:force:noscroll \
     echo "conda activate ${VENV}" >> /opt/nvidia/entrypoint.d/110.conda_default_env.sh && \
     echo "conda activate ${VENV}" >> $HOME/.bashrc
 
-ENV PATH /opt/conda/bin:$PATH
+ENV PATH=/opt/conda/bin:$PATH
 
-# 配置 conda 使用清华大学镜像源加速
-RUN conda config --add channels conda-forge && \
-    conda config --set channel_priority strict && \
-    conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/main && \
-    conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/pkgs/free && \
+# 配置 conda 使用清华大学镜像源加速，移除默认频道避免 TOS 问题
+RUN conda config --remove channels defaults || true && \
     conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge && \
+    conda config --add channels conda-forge && \
+    conda config --set channel_priority strict && \
     conda config --set show_channel_urls yes
 # ------------------------------------------------------------------
 # ~conda
@@ -43,11 +42,11 @@ RUN conda config --add channels conda-forge && \
 
 RUN conda create -y -n ${VENV} python=3.10
 ENV CONDA_DEFAULT_ENV=${VENV}
-ENV PATH /opt/conda/bin:/opt/conda/envs/${VENV}/bin:$PATH
+ENV PATH=/opt/conda/bin:/opt/conda/envs/${VENV}/bin:$PATH
 
 WORKDIR /workspace
 
-ENV PYTHONPATH="${PYTHONPATH}:/workspace/CosyVoice:/workspace/CosyVoice/third_party/Matcha-TTS"
+ENV PYTHONPATH=/workspace/CosyVoice:/workspace/CosyVoice/third_party/Matcha-TTS
 
 RUN git clone --recursive https://github.com/aucho/CosyVoice.git
 
