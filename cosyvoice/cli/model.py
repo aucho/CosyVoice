@@ -63,6 +63,8 @@ class CosyVoiceModel:
         self.mel_overlap_dict = {}
         self.flow_cache_dict = {}
         self.hift_cache_dict = {}
+        self._cleanup_counter = 0
+        self._max_cleanup_interval = 10  # 最多10次推理后清理一次
 
     def load(self, llm_model, flow_model, hift_model):
         self.llm.load_state_dict(torch.load(llm_model, map_location=self.device), strict=True)
@@ -226,15 +228,22 @@ class CosyVoiceModel:
                                              finalize=True,
                                              speed=speed)
             yield {'tts_speech': this_tts_speech.cpu()}
+        
+        # 清理会话相关变量（保持原有逻辑）
         with self.lock:
             self.tts_speech_token_dict.pop(this_uuid)
             self.llm_end_dict.pop(this_uuid)
             self.mel_overlap_dict.pop(this_uuid)
             self.hift_cache_dict.pop(this_uuid)
             self.flow_cache_dict.pop(this_uuid)
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.current_stream().synchronize()
+        
+        # 安全的显存清理：只在推理完成后进行
+        self._cleanup_counter += 1
+        if self._cleanup_counter >= self._max_cleanup_interval:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.current_stream().synchronize()
+            self._cleanup_counter = 0
 
 
 class CosyVoice2Model(CosyVoiceModel):

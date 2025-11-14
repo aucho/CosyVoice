@@ -151,14 +151,37 @@ class TransformerLM(torch.nn.Module):
             sampling: int,
             ignore_eos: bool = True,
     ):
+        # 添加输入验证
+        if weighted_scores.numel() == 0:
+            raise ValueError("weighted_scores cannot be empty")
+        
         num_trials, max_trials = 0, 100
         while True:
             top_ids = self.sampling(weighted_scores, decoded_tokens, sampling)
-            if (not ignore_eos) or (self.speech_token_size not in top_ids):
+            # 确保返回的是整数类型
+            if isinstance(top_ids, torch.Tensor):
+                top_ids = top_ids.item()
+            top_ids = int(top_ids)
+            
+            # 验证top_ids是否在有效范围内
+            if top_ids < 0 or top_ids >= weighted_scores.size(0):
+                print(f"Warning: top_ids {top_ids} out of range [0, {weighted_scores.size(0)-1}]")
+                top_ids = max(0, min(top_ids, weighted_scores.size(0)-1))
+            
+            if (not ignore_eos) or (self.speech_token_size != top_ids):
                 break
             num_trials += 1
             if num_trials > max_trials:
-                raise RuntimeError('sampling reaches max_trials {} and still get eos when ignore_eos is True, check your input!'.format(max_trials))
+                # 添加更详细的调试信息
+                print(f"Warning: sampling reached max_trials {max_trials}, weighted_scores shape: {weighted_scores.shape}")
+                print(f"speech_token_size: {self.speech_token_size}, top_ids: {top_ids}")
+                # 强制选择一个非EOS的token
+                non_eos_indices = torch.where(weighted_scores != self.speech_token_size)[0]
+                if len(non_eos_indices) > 0:
+                    top_ids = non_eos_indices[0].item()
+                    break
+                else:
+                    raise RuntimeError('sampling reaches max_trials {} and still get eos when ignore_eos is True, check your input!'.format(max_trials))
         return top_ids
 
     @torch.inference_mode()
@@ -209,23 +232,30 @@ class TransformerLM(torch.nn.Module):
         out_tokens = []
         offset = 0
         att_cache, cnn_cache = torch.zeros((0, 0, 0, 0), device=lm_input.device), torch.zeros((0, 0, 0, 0), device=lm_input.device)
-        for i in range(max_len):
-            y_pred, att_cache, cnn_cache = self.llm.forward_chunk(lm_input, offset=offset, required_cache_size=-1,
+        
+        try:
+            for i in range(max_len):
+                y_pred, att_cache, cnn_cache = self.llm.forward_chunk(lm_input, offset=offset, required_cache_size=-1,
                                                                   att_cache=att_cache, cnn_cache=cnn_cache,
                                                                   att_mask=torch.tril(torch.ones((1, lm_input.shape[1], lm_input.shape[1]),
                                                                                                  device=lm_input.device)).to(torch.bool))
-            logp = self.llm_decoder(y_pred[:, -1]).log_softmax(dim=-1)
-            # force continue decode first token
-            if i == 0:
-                logp[:, self.speech_token_size] = -float('inf')
-            top_ids = self.sampling_ids(logp.squeeze(dim=0), out_tokens, sampling, ignore_eos=True if i < min_len else False).item()
-            if top_ids == self.speech_token_size:
-                break
-            # in stream mode, yield token one by one
-            yield top_ids
-            out_tokens.append(top_ids)
-            offset += lm_input.size(1)
-            lm_input = self.speech_embedding.weight[top_ids].reshape(1, 1, -1)
+                logp = self.llm_decoder(y_pred[:, -1]).log_softmax(dim=-1)
+                # force continue decode first token
+                if i == 0:
+                    logp[:, self.speech_token_size] = -float('inf')
+                top_ids = self.sampling_ids(logp.squeeze(dim=0), out_tokens, sampling, ignore_eos=True if i < min_len else False)
+                # 确保top_ids是整数类型再用于索引
+                lm_input = self.speech_embedding.weight[top_ids].reshape(1, 1, -1)
+                if top_ids == self.speech_token_size:
+                    break
+                # in stream mode, yield token one by one
+                yield top_ids
+                out_tokens.append(top_ids)
+                offset += lm_input.size(1)
+        finally:
+            # 推理完成后清理显存，不影响生成过程
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
 
 class Qwen2Encoder(torch.nn.Module):
@@ -500,7 +530,14 @@ class Qwen2LM(TransformerLM):
                                                           masks=torch.tril(torch.ones((1, lm_input.shape[1], lm_input.shape[1]), device=lm_input.device)).to(torch.bool),
                                                           cache=cache)
                 logp = self.llm_decoder(y_pred[:, -1]).log_softmax(dim=-1)
-                top_ids = self.sampling_ids(logp.squeeze(dim=0), out_tokens, sampling, ignore_eos=True if i < min_len else False).item()
+                # 在inference方法中，确保top_ids是整数类型
+                top_ids = self.sampling_ids(logp.squeeze(dim=0), out_tokens, sampling, ignore_eos=True if i < min_len else False)
+                if isinstance(top_ids, torch.Tensor):
+                    top_ids = top_ids.item()
+                top_ids = int(top_ids)
+
+                # 确保top_ids是整数类型再用于索引
+                lm_input = self.speech_embedding.weight[top_ids].reshape(1, 1, -1)
                 if top_ids == self.speech_token_size:
                     break
                 if top_ids > self.speech_token_size:
@@ -599,8 +636,13 @@ class Qwen2LM(TransformerLM):
                                                       masks=torch.tril(torch.ones((1, seq_len, seq_len), device=lm_input.device)).to(torch.bool),
                                                       cache=cache)
             logp = self.llm_decoder(y_pred[:, -1]).log_softmax(dim=-1)
-            top_ids = self.sampling_ids(logp.squeeze(dim=0), out_tokens, sampling, ignore_eos=False).item()
-            out_tokens.append(top_ids)
+            top_ids = self.sampling_ids(logp.squeeze(dim=0), out_tokens, sampling, ignore_eos=False)
+            if isinstance(top_ids, torch.Tensor):
+                top_ids = top_ids.item()
+            top_ids = int(top_ids)
+
+            # 确保top_ids是整数类型再用于索引
+            lm_input = self.speech_embedding.weight[top_ids].reshape(1, 1, -1)
             if top_ids >= self.speech_token_size:
                 if top_ids == self.speech_token_size:
                     break

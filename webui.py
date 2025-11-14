@@ -20,6 +20,10 @@ import torch
 import torchaudio
 import random
 import librosa
+import threading
+import re
+from datetime import datetime
+from pathlib import Path
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append('{}/third_party/Matcha-TTS'.format(ROOT_DIR))
 from cosyvoice.cli.cosyvoice import CosyVoice, CosyVoice2
@@ -34,6 +38,8 @@ instruct_dict = {'预训练音色': '1. 选择预训练音色\n2. 点击生成�
 stream_mode_list = [('否', False), ('是', True)]
 max_val = 0.8
 
+# 全局停止标志
+stop_generation = threading.Event()
 
 def generate_seed():
     seed = random.randint(1, 100000000)
@@ -42,6 +48,10 @@ def generate_seed():
         "value": seed
     }
 
+def stop_generation_func():
+    """停止生成函数"""
+    stop_generation.set()
+    return "生成已停止"
 
 def postprocess(speech, top_db=60, hop_length=220, win_length=440):
     speech, _ = librosa.effects.trim(
@@ -54,13 +64,389 @@ def postprocess(speech, top_db=60, hop_length=220, win_length=440):
     speech = torch.concat([speech, torch.zeros(1, int(cosyvoice.sample_rate * 0.2))], dim=1)
     return speech
 
-
 def change_instruction(mode_checkbox_group):
     return instruct_dict[mode_checkbox_group]
 
+def count_words(text):
+    """计算文本的单词数：中文按字符数，英文按单词数"""
+    if not text or not text.strip():
+        return 0
+    # 分离中文字符和英文单词
+    chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', text))
+    # 英文单词：按空格分割，过滤空字符串
+    english_words = len([w for w in re.findall(r'[a-zA-Z]+', text)])
+    # 其他字符（标点、数字等）计入中文字符
+    return chinese_chars + english_words
+
+def split_text_by_words(text, words_per_segment):
+    """根据单词数分割文本"""
+    if not text or not text.strip():
+        return []
+    
+    segments = []
+    current_pos = 0
+    text_length = len(text)
+    
+    while current_pos < text_length:
+        # 跳过空白字符
+        while current_pos < text_length and text[current_pos].isspace():
+            current_pos += 1
+        
+        if current_pos >= text_length:
+            break
+        
+        # 找到当前段的结束位置
+        segment_start = current_pos
+        word_count = 0
+        segment_end = current_pos
+        
+        # 寻找分割点
+        while segment_end < text_length and word_count < words_per_segment:
+            char = text[segment_end]
+            
+            # 中文字符直接计数
+            if re.match(r'[\u4e00-\u9fff]', char):
+                word_count += 1
+                segment_end += 1
+            # 英文单词：找到单词边界
+            elif re.match(r'[a-zA-Z]', char):
+                # 找到整个单词
+                word_match = re.match(r'[a-zA-Z]+', text[segment_end:])
+                if word_match:
+                    word_count += 1
+                    segment_end += len(word_match.group())
+                else:
+                    segment_end += 1
+            else:
+                # 其他字符（标点、空格等）继续
+                segment_end += 1
+        
+        # 如果还没达到单词数限制就已到文本末尾，直接取剩余部分
+        if segment_end >= text_length:
+            segment = text[segment_start:].strip()
+            if segment:
+                segments.append(segment)
+            break
+        
+        # 尝试在合适的位置分割（避免截断单词）
+        # 向后查找空格、标点等分隔符
+        best_split = segment_end
+        search_start = max(segment_start, segment_end - 50)  # 在最后50个字符内查找
+        
+        for i in range(segment_end - 1, search_start, -1):
+            if text[i] in [' ', '\n', '\t', '。', '，', '.', ',', ';', ':', '!', '?', '！', '？']:
+                best_split = i + 1
+                break
+        
+        segment = text[segment_start:best_split].strip()
+        if segment:
+            segments.append(segment)
+        
+        current_pos = best_split
+    
+    return segments if segments else [text.strip()] if text.strip() else []
+
+def process_text_split(input_text, words_per_segment):
+    """处理文本分割，返回分割后的文本列表和分段数量"""
+    if not input_text or not input_text.strip():
+        return [], 0
+    
+    segments = split_text_by_words(input_text, words_per_segment)
+    return segments, len(segments)
+
+def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dropdown, prompt_text, 
+                         prompt_wav_upload, prompt_wav_record, instruct_text, seed, stream, speed):
+    """批量生成音频并保存到指定目录"""
+    if not text_segments or len(text_segments) == 0:
+        empty_audio = np.zeros(1000, dtype=np.float32)
+        yield "没有文本需要生成", (cosyvoice.sample_rate, empty_audio)
+        return
+    
+    # 规范化输出目录路径（处理Windows路径）
+    output_dir = str(output_dir).strip()
+    if not output_dir:
+        # WSL/Linux环境下的默认路径：使用当前工作目录下的audios文件夹
+        output_dir = "./audios"
+    
+    # 确保路径正确处理（支持相对路径和绝对路径）
+    # 在Windows上，检查路径是否以驱动器字母开头（如 c:/ 或 c:\）
+    if os.name == 'nt':  # Windows
+        # Windows 路径处理：确保识别 c:/ 或 c:\ 为绝对路径
+        if len(output_dir) >= 2 and output_dir[1] == ':':
+            # 路径以驱动器字母开头，已经是绝对路径
+            output_path = Path(output_dir)
+        else:
+            # 相对路径，转换为绝对路径（相对于当前工作目录）
+            output_path = Path(output_dir).resolve()
+    else:
+        # Linux/WSL系统：支持相对路径和绝对路径
+        output_path = Path(output_dir)
+        # 如果是相对路径（如 ./audios），resolve() 会将其转换为绝对路径
+        # 如果是绝对路径（如 /home/user/audios），保持原样
+        if not output_path.is_absolute():
+            output_path = output_path.resolve()
+        else:
+            # 已经是绝对路径，直接使用
+            output_path = Path(output_dir)
+    
+    # 创建时间命名的文件夹
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_dir = output_path / timestamp
+    
+    # 确保父目录存在
+    try:
+        save_dir.mkdir(parents=True, exist_ok=True)
+        logging.info(f'创建保存目录: {save_dir}')
+        empty_audio = np.zeros(1000, dtype=np.float32)
+        display_path = format_path_for_display(save_dir.resolve())
+        yield f"保存目录已创建: {display_path}", (cosyvoice.sample_rate, empty_audio)
+    except Exception as e:
+        error_msg = f"无法创建保存目录 {save_dir}: {str(e)}"
+        logging.error(error_msg)
+        empty_audio = np.zeros(1000, dtype=np.float32)
+        yield error_msg, (cosyvoice.sample_rate, empty_audio)
+        return
+    
+    total_segments = len(text_segments)
+    
+    # 处理prompt音频
+    if prompt_wav_upload is not None:
+        prompt_wav = prompt_wav_upload
+    elif prompt_wav_record is not None:
+        prompt_wav = prompt_wav_record
+    else:
+        prompt_wav = None
+    
+    # 重置停止标志
+    stop_generation.clear()
+    
+    saved_count = 0
+    empty_audio = np.zeros(1000, dtype=np.float32)
+    
+    try:
+        for idx, tts_text in enumerate(text_segments, 1):
+            if stop_generation.is_set():
+                yield f"生成已停止（已生成 {saved_count}/{total_segments} 个音频）", (cosyvoice.sample_rate, empty_audio)
+                break
+            
+            if not tts_text or not tts_text.strip():
+                continue
+            
+            yield f"正在生成第 {idx}/{total_segments} 个音频...", (cosyvoice.sample_rate, empty_audio)
+            
+            try:
+                # 生成音频
+                audio_data = None
+                audio_chunks = []  # 收集所有音频片段
+                
+                if mode_checkbox_group == '预训练音色':
+                    set_all_random_seed(seed)
+                    for i in cosyvoice.inference_sft(tts_text, sft_dropdown, stream=False, speed=speed):
+                        # 收集所有音频片段，不要只取第一个
+                        if 'tts_speech' in i:
+                            audio_chunks.append(i['tts_speech'])
+                elif mode_checkbox_group == '3s极速复刻':
+                    if prompt_wav is None:
+                        continue
+                    prompt_speech_16k = postprocess(load_wav(prompt_wav, prompt_sr))
+                    set_all_random_seed(seed)
+                    for i in cosyvoice.inference_zero_shot(tts_text, prompt_text, prompt_speech_16k, stream=False, speed=speed):
+                        if 'tts_speech' in i:
+                            audio_chunks.append(i['tts_speech'])
+                elif mode_checkbox_group == '跨语种复刻':
+                    if prompt_wav is None:
+                        continue
+                    prompt_speech_16k = postprocess(load_wav(prompt_wav, prompt_sr))
+                    set_all_random_seed(seed)
+                    for i in cosyvoice.inference_cross_lingual(tts_text, prompt_speech_16k, stream=False, speed=speed):
+                        if 'tts_speech' in i:
+                            audio_chunks.append(i['tts_speech'])
+                else:  # 自然语言控制
+                    set_all_random_seed(seed)
+                    for i in cosyvoice.inference_instruct(tts_text, sft_dropdown, instruct_text, stream=False, speed=speed):
+                        if 'tts_speech' in i:
+                            audio_chunks.append(i['tts_speech'])
+                
+                # 拼接所有音频片段
+                if audio_chunks:
+                    # 将所有片段拼接在一起
+                    # 首先统一所有片段的维度
+                    processed_chunks = []
+                    for chunk in audio_chunks:
+                        # 确保每个片段都是 (channels, length) 格式
+                        if chunk.dim() == 1:
+                            chunk = chunk.unsqueeze(0)  # (length,) -> (1, length)
+                        elif chunk.dim() == 2 and chunk.shape[0] > 1:
+                            chunk = chunk[0:1]  # (batch, length) -> (1, length)
+                        processed_chunks.append(chunk)
+                    
+                    # 在时间维度（dim=1）上拼接所有片段
+                    audio_data = torch.cat(processed_chunks, dim=1)
+                    logging.info(f'收集到 {len(audio_chunks)} 个音频片段，拼接后总长度: {audio_data.shape[1]} 采样点')
+                else:
+                    audio_data = None
+                
+                if audio_data is not None:
+                    # 确保音频数据格式正确 (channels, length)
+                    if audio_data.dim() == 1:
+                        audio_data = audio_data.unsqueeze(0)  # (length,) -> (1, length)
+                    elif audio_data.dim() == 2 and audio_data.shape[0] > 1:
+                        # 如果是(batch, length)，取第一个
+                        audio_data = audio_data[0:1]  # (batch, length) -> (1, length)
+                    elif audio_data.dim() == 2 and audio_data.shape[0] == 1:
+                        # 已经是(1, length)，保持不变
+                        pass
+                    else:
+                        # 其他情况，尝试flatten并unsqueeze
+                        audio_data = audio_data.flatten().unsqueeze(0)
+                    
+                    # 保存音频
+                    audio_path = save_dir / f"{idx:04d}.wav"
+                    try:
+                        # 规范化路径，避免被识别为URI协议
+                        audio_path_str = str(audio_path.resolve())
+                        audio_path_str = os.path.normpath(audio_path_str)
+                        if os.name == 'nt':  # Windows
+                            audio_path_str = audio_path_str.replace('/', '\\')
+                        torchaudio.save(audio_path_str, audio_data, cosyvoice.sample_rate)
+                        
+                        # 验证文件是否保存成功
+                        if audio_path.exists() and audio_path.stat().st_size > 0:
+                            saved_count += 1
+                            abs_path = audio_path.resolve()
+                            logging.info(f'成功保存音频: {abs_path} (大小: {audio_path.stat().st_size} 字节)')
+                            
+                            # 转换为 float32 格式的 numpy 数组，确保值在 -1.0 到 1.0 之间
+                            audio_numpy = audio_data.squeeze().cpu().numpy().astype(np.float32)
+                            # 确保值在有效范围内
+                            if audio_numpy.max() > 1.0 or audio_numpy.min() < -1.0:
+                                audio_numpy = np.clip(audio_numpy, -1.0, 1.0)
+                            
+                            yield f"已生成第 {idx}/{total_segments} 个音频，保存到: {format_path_for_display(abs_path)}", (cosyvoice.sample_rate, audio_numpy)
+                            
+                            # 每段生成完后清显存
+                            # 将张量移到CPU并删除
+                            if audio_data.is_cuda:
+                                audio_data = audio_data.cpu()
+                            del audio_data
+                            del audio_numpy
+                            # 清空GPU缓存
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                        else:
+                            error_msg = f"文件保存失败: {audio_path} (文件不存在或大小为0)"
+                            logging.error(error_msg)
+                            # 即使保存失败也要清显存
+                            if audio_data.is_cuda:
+                                audio_data = audio_data.cpu()
+                            del audio_data
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                            yield error_msg, (cosyvoice.sample_rate, empty_audio)
+                    except Exception as save_error:
+                        error_msg = f"保存音频文件时出错: {str(save_error)}"
+                        logging.error(error_msg)
+                        # 出错时也要清显存
+                        if audio_data is not None:
+                            if audio_data.is_cuda:
+                                audio_data = audio_data.cpu()
+                            del audio_data
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        yield f"第 {idx}/{total_segments} 个音频保存失败: {str(save_error)}", (cosyvoice.sample_rate, empty_audio)
+                else:
+                    yield f"第 {idx}/{total_segments} 个音频生成失败", (cosyvoice.sample_rate, empty_audio)
+                
+                # 清理音频片段列表
+                del audio_chunks
+                del processed_chunks
+                    
+            except Exception as e:
+                logging.error(f'生成第 {idx} 个音频时出现错误: {e}')
+                # 出错时也要清显存
+                if 'audio_chunks' in locals():
+                    del audio_chunks
+                if 'audio_data' in locals():
+                    if audio_data is not None and audio_data.is_cuda:
+                        audio_data = audio_data.cpu()
+                    del audio_data
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                yield f"第 {idx}/{total_segments} 个音频生成出错: {str(e)}", (cosyvoice.sample_rate, empty_audio)
+        
+        if not stop_generation.is_set():
+            # 合并所有生成的音频文件
+            if saved_count > 0:
+                try:
+                    # 按序号顺序读取所有音频文件
+                    audio_files = []
+                    for idx in range(1, total_segments + 1):
+                        audio_file = save_dir / f"{idx:04d}.wav"
+                        if audio_file.exists() and audio_file.stat().st_size > 0:
+                            audio_files.append(audio_file)
+                    
+                    if len(audio_files) > 0:
+                        # 读取所有音频文件并拼接
+                        merged_audio_chunks = []
+                        for audio_file in audio_files:
+                            waveform, sample_rate = torchaudio.load(str(audio_file))
+                            # 确保格式统一：转换为 (channels, length) 格式
+                            if waveform.dim() == 1:
+                                waveform = waveform.unsqueeze(0)
+                            elif waveform.dim() == 2 and waveform.shape[0] > 1:
+                                waveform = waveform[0:1]  # 取第一个声道
+                            merged_audio_chunks.append(waveform)
+                        
+                        # 在时间维度上拼接所有音频
+                        if merged_audio_chunks:
+                            merged_audio = torch.cat(merged_audio_chunks, dim=1)
+                            
+                            # 保存合并的音频
+                            merged_audio_path = save_dir / "合并的音频.wav"
+                            merged_audio_path_str = str(merged_audio_path.resolve())
+                            merged_audio_path_str = os.path.normpath(merged_audio_path_str)
+                            if os.name == 'nt':  # Windows
+                                merged_audio_path_str = merged_audio_path_str.replace('/', '\\')
+                            
+                            torchaudio.save(merged_audio_path_str, merged_audio, cosyvoice.sample_rate)
+                            
+                            if merged_audio_path.exists() and merged_audio_path.stat().st_size > 0:
+                                merged_display_path = format_path_for_display(merged_audio_path.resolve())
+                                logging.info(f'成功合并音频: {merged_display_path}')
+                                display_path = format_path_for_display(save_dir.resolve())
+                                final_msg = f"全部完成！共生成 {saved_count}/{total_segments} 个音频，保存目录: {display_path}\n合并音频已保存: {merged_display_path}"
+                            else:
+                                display_path = format_path_for_display(save_dir.resolve())
+                                final_msg = f"全部完成！共生成 {saved_count}/{total_segments} 个音频，保存目录: {display_path}\n合并音频保存失败"
+                        else:
+                            display_path = format_path_for_display(save_dir.resolve())
+                            final_msg = f"全部完成！共生成 {saved_count}/{total_segments} 个音频，保存目录: {display_path}"
+                    else:
+                        display_path = format_path_for_display(save_dir.resolve())
+                        final_msg = f"全部完成！共生成 {saved_count}/{total_segments} 个音频，保存目录: {display_path}"
+                except Exception as merge_error:
+                    logging.error(f'合并音频时出错: {merge_error}')
+                    display_path = format_path_for_display(save_dir.resolve())
+                    final_msg = f"全部完成！共生成 {saved_count}/{total_segments} 个音频，保存目录: {display_path}\n合并音频出错: {str(merge_error)}"
+            else:
+                display_path = format_path_for_display(save_dir.resolve())
+                final_msg = f"全部完成！共生成 {saved_count}/{total_segments} 个音频，保存目录: {display_path}"
+            
+            logging.info(final_msg)
+            yield final_msg, (cosyvoice.sample_rate, empty_audio)
+            
+    except Exception as e:
+        logging.error(f'批量生成过程中出现错误: {e}')
+        yield f"批量生成出错: {str(e)}", (cosyvoice.sample_rate, empty_audio)
+    finally:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 def generate_audio(tts_text, mode_checkbox_group, sft_dropdown, prompt_text, prompt_wav_upload, prompt_wav_record, instruct_text,
                    seed, stream, speed):
+    # 重置停止标志
+    stop_generation.clear()
+    
     if prompt_wav_upload is not None:
         prompt_wav = prompt_wav_upload
     elif prompt_wav_record is not None:
@@ -111,29 +497,54 @@ def generate_audio(tts_text, mode_checkbox_group, sft_dropdown, prompt_text, pro
         if instruct_text != '':
             gr.Info('您正在使用3s极速复刻模式，预训练音色/instruct文本会被忽略！')
 
-    if mode_checkbox_group == '预训练音色':
-        logging.info('get sft inference request')
-        set_all_random_seed(seed)
-        for i in cosyvoice.inference_sft(tts_text, sft_dropdown, stream=stream, speed=speed):
-            yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
-    elif mode_checkbox_group == '3s极速复刻':
-        logging.info('get zero_shot inference request')
-        prompt_speech_16k = postprocess(load_wav(prompt_wav, prompt_sr))
-        set_all_random_seed(seed)
-        for i in cosyvoice.inference_zero_shot(tts_text, prompt_text, prompt_speech_16k, stream=stream, speed=speed):
-            yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
-    elif mode_checkbox_group == '跨语种复刻':
-        logging.info('get cross_lingual inference request')
-        prompt_speech_16k = postprocess(load_wav(prompt_wav, prompt_sr))
-        set_all_random_seed(seed)
-        for i in cosyvoice.inference_cross_lingual(tts_text, prompt_speech_16k, stream=stream, speed=speed):
-            yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
-    else:
-        logging.info('get instruct inference request')
-        set_all_random_seed(seed)
-        for i in cosyvoice.inference_instruct(tts_text, sft_dropdown, instruct_text, stream=stream, speed=speed):
-            yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
+    try:
+        if mode_checkbox_group == '预训练音色':
+            logging.info('get sft inference request')
+            set_all_random_seed(seed)
+            for i in cosyvoice.inference_sft(tts_text, sft_dropdown, stream=stream, speed=speed):
+                if stop_generation.is_set():
+                    logging.info('生成被用户停止')
+                    break
+                yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
+        elif mode_checkbox_group == '3s极速复刻':
+            logging.info('get zero_shot inference request')
+            prompt_speech_16k = postprocess(load_wav(prompt_wav, prompt_sr))
+            set_all_random_seed(seed)
+            for i in cosyvoice.inference_zero_shot(tts_text, prompt_text, prompt_speech_16k, stream=stream, speed=speed):
+                if stop_generation.is_set():
+                    logging.info('生成被用户停止')
+                    break
+                yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
+        elif mode_checkbox_group == '跨语种复刻':
+            logging.info('get cross_lingual inference request')
+            prompt_speech_16k = postprocess(load_wav(prompt_wav, prompt_sr))
+            set_all_random_seed(seed)
+            for i in cosyvoice.inference_cross_lingual(tts_text, prompt_speech_16k, stream=stream, speed=speed):
+                if stop_generation.is_set():
+                    logging.info('生成被用户停止')
+                    break
+                yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
+        else:
+            logging.info('get instruct inference request')
+            set_all_random_seed(seed)
+            for i in cosyvoice.inference_instruct(tts_text, sft_dropdown, instruct_text, stream=stream, speed=speed):
+                if stop_generation.is_set():
+                    logging.info('生成被用户停止')
+                    break
+                yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
+    except Exception as e:
+        logging.error(f'生成过程中出现错误: {e}')
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        yield (cosyvoice.sample_rate, default_data)
 
+def format_path_for_display(path):
+    """将路径格式化显示，将 /workspace 替换为 C:\\repo\\CosyVoice"""
+    path_str = str(path)
+    # 将 /workspace 替换为 C:\repo\CosyVoice
+    if path_str.startswith('/workspace'):
+        path_str = path_str.replace('/workspace', 'C:\\repo\\CosyVoice', 1)
+    return path_str
 
 def main():
     with gr.Blocks() as demo:
@@ -143,10 +554,23 @@ def main():
                     [CosyVoice-300M-SFT](https://www.modelscope.cn/models/iic/CosyVoice-300M-SFT)")
         gr.Markdown("#### 请输入需要合成的文本，选择推理模式，并按照提示步骤进行操作")
 
-        tts_text = gr.Textbox(label="输入合成文本", lines=1, value="我是通义实验室语音团队全新推出的生成式语音大模型，提供舒适自然的语音合成能力。")
         with gr.Row():
-            mode_checkbox_group = gr.Radio(choices=inference_mode_list, label='选择推理模式', value=inference_mode_list[0])
-            instruction_text = gr.Text(label="操作步骤", value=instruct_dict[inference_mode_list[0]], scale=0.5)
+            tts_text = gr.Textbox(label="输入合成文本", lines=5, value="我是通义实验室语音团队全新推出的生成式语音大模型，提供舒适自然的语音合成能力。")
+            with gr.Column(scale=0.3):
+                words_per_segment = gr.Number(value=10000, label="单段单词数", minimum=50, maximum=99999, step=100)
+                split_button = gr.Button("分割文本", variant="secondary")
+                segment_count_display = gr.Textbox(label="分段数量", value="0", interactive=False)
+        
+        # 分割后的文本框区域
+        with gr.Column(visible=True) as segments_column:
+            gr.Markdown("### 分割后的文本段（可编辑）")
+            text_segments_list = []
+            for i in range(100):  # 最多支持100个分段
+                text_segments_list.append(gr.Textbox(label=f"分段 {i+1}", lines=3, interactive=True, visible=False))
+        
+        with gr.Row():
+            mode_checkbox_group = gr.Radio(choices=inference_mode_list, label='选择推理模式', value=inference_mode_list[1])  # 改为 [1] 表示 '3s极速复刻'
+            instruction_text = gr.Text(label="操作步骤", value=instruct_dict[inference_mode_list[1]], scale=0.5)  # 改为 [1] 对应 '3s极速复刻' 的操作步骤
             sft_dropdown = gr.Dropdown(choices=sft_spk, label='选择预训练音色', value=sft_spk[0], scale=0.25)
             stream = gr.Radio(choices=stream_mode_list, label='是否流式推理', value=stream_mode_list[0][1])
             speed = gr.Number(value=1, label="速度调节(仅支持非流式推理)", minimum=0.5, maximum=2.0, step=0.1)
@@ -160,19 +584,79 @@ def main():
         prompt_text = gr.Textbox(label="输入prompt文本", lines=1, placeholder="请输入prompt文本，需与prompt音频内容一致，暂时不支持自动识别...", value='')
         instruct_text = gr.Textbox(label="输入instruct文本", lines=1, placeholder="请输入instruct文本.", value='')
 
-        generate_button = gr.Button("生成音频")
+        # 目录选择
+        output_dir = gr.Textbox(label="输出目录", value="./audios", interactive=True)
+        
+        with gr.Row():
+            generate_button = gr.Button("开始生成", variant="primary")
+            stop_button = gr.Button("停止生成", variant="stop")
 
-        audio_output = gr.Audio(label="合成音频", autoplay=True, streaming=True)
+        audio_output = gr.Audio(label="合成音频预览", autoplay=True, streaming=True)
+        status_text = gr.Textbox(label="状态", value="就绪", interactive=False)
 
+        # 更新分割功能
+        def update_segments(input_text, words_per_seg):
+            if not input_text or not input_text.strip():
+                return [gr.update(visible=False, value="")] * 100 + [gr.update(value="0")]
+            
+            segments, segment_count = process_text_split(input_text, words_per_seg)
+            
+            updates = []
+            for i in range(100):
+                if i < len(segments):
+                    updates.append(gr.update(visible=True, value=segments[i], label=f"分段 {i+1}"))
+                else:
+                    updates.append(gr.update(visible=False, value=""))
+            
+            updates.append(gr.update(value=str(segment_count)))
+            return updates
+        
+        split_button.click(
+            fn=update_segments,
+            inputs=[tts_text, words_per_segment],
+            outputs=text_segments_list + [segment_count_display]
+        )
+        
+        # 批量生成函数
+        def batch_generate_wrapper(*args):
+            # 从文本框中提取所有文本段
+            text_segments = [tb for tb in args[:100] if tb and tb.strip()]
+            
+            if not text_segments:
+                yield "没有文本需要生成", (cosyvoice.sample_rate, default_data)
+                return
+            
+            # 获取其他参数
+            output_dir_path = args[100]
+            mode_checkbox_group = args[101]
+            sft_dropdown = args[102]
+            prompt_text = args[103]
+            prompt_wav_upload = args[104]
+            prompt_wav_record = args[105]
+            instruct_text = args[106]
+            seed = args[107]
+            stream = args[108]
+            speed = args[109]
+            
+            # 调用批量生成函数
+            for status, audio in generate_batch_audio(
+                text_segments, output_dir_path, mode_checkbox_group, sft_dropdown,
+                prompt_text, prompt_wav_upload, prompt_wav_record, instruct_text,
+                seed, stream, speed
+            ):
+                yield status, audio
+        
         seed_button.click(generate_seed, inputs=[], outputs=seed)
-        generate_button.click(generate_audio,
-                              inputs=[tts_text, mode_checkbox_group, sft_dropdown, prompt_text, prompt_wav_upload, prompt_wav_record, instruct_text,
-                                      seed, stream, speed],
-                              outputs=[audio_output])
+        generate_button.click(
+            batch_generate_wrapper,
+            inputs=[*text_segments_list, output_dir, mode_checkbox_group, sft_dropdown, prompt_text, 
+                   prompt_wav_upload, prompt_wav_record, instruct_text, seed, stream, speed],
+            outputs=[status_text, audio_output]
+        )
+        stop_button.click(stop_generation_func, inputs=[], outputs=[status_text])
         mode_checkbox_group.change(fn=change_instruction, inputs=[mode_checkbox_group], outputs=[instruction_text])
     demo.queue(max_size=4, default_concurrency_limit=2)
     demo.launch(server_name='0.0.0.0', server_port=args.port)
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

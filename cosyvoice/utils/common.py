@@ -131,12 +131,14 @@ def nucleus_sampling(weighted_scores, top_p=0.8, top_k=25):
     prob = torch.tensor(prob).to(weighted_scores)
     indices = torch.tensor(indices, dtype=torch.long).to(weighted_scores.device)
     top_ids = indices[prob.multinomial(1, replacement=True)]
-    return top_ids
+    # 确保返回的是整数类型
+    return top_ids.long()
 
 
 def random_sampling(weighted_scores, decoded_tokens, sampling):
     top_ids = weighted_scores.softmax(dim=0).multinomial(1, replacement=True)
-    return top_ids
+    # 确保返回的是整数类型
+    return top_ids.long()
 
 
 def fade_in_out(fade_in_mel, fade_out_mel, window):

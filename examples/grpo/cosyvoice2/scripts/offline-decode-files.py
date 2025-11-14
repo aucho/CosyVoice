@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+#
 # Copyright (c)  2023 by manyeyes
 # Copyright (c)  2023  Xiaomi Corporation
 
@@ -193,7 +195,7 @@ def write_error_stats(
             hyp = list("".join(hyp))
             results[i] = (cut_id, ref, hyp)
 
-    for _cut_id, ref, hyp in results:
+    for cut_id, ref, hyp in results:
         ali = kaldialign.align(ref, hyp, ERR, sclite_mode=sclite_mode)
         for ref_word, hyp_word in ali:
             if ref_word == ERR:

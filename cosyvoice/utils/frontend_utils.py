@@ -16,6 +16,34 @@ import re
 import regex
 chinese_char_pattern = re.compile(r'[\u4e00-\u9fff]+')
 
+# 英文单词边界检测的正则表达式
+word_boundary_pattern = re.compile(r'\b')
+
+
+def find_english_word_boundary(text: str, start_pos: int, end_pos: int) -> int:
+    """
+    在指定范围内找到最佳的英文单词边界位置
+    返回最接近end_pos但不截断单词的位置
+    """
+    # 首先尝试在空格、标点符号等明显分隔符处分割
+    for i in range(end_pos, start_pos, -1):
+        if text[i] in [' ', '\t', '\n', '.', ',', ';', ':', '!', '?', '-', '_']:
+            return i + 1
+    
+    # 如果没有找到明显分隔符，尝试在单词边界分割
+    # 寻找字母到非字母的转换点
+    for i in range(end_pos, start_pos, -1):
+        if i > 0 and i < len(text) - 1:
+            # 当前字符是字母，下一个字符不是字母
+            if text[i].isalpha() and not text[i + 1].isalpha():
+                return i + 1
+            # 当前字符不是字母，下一个字符是字母
+            elif not text[i].isalpha() and text[i + 1].isalpha():
+                return i + 1
+    
+    # 如果都找不到合适的边界，返回原始位置
+    return end_pos
+
 
 # whether contain chinese character
 def contains_chinese(text):
@@ -75,6 +103,14 @@ def split_paragraph(text: str, tokenize, lang="zh", token_max_n=80, token_min_n=
         else:
             return len(tokenize(_text)) < merge_len
 
+    # 处理空文本
+    if not text or not text.strip():
+        return []
+
+    # 参数验证
+    if token_min_n > token_max_n:
+        token_min_n, token_max_n = token_max_n, token_min_n
+
     if lang == "zh":
         pounc = ['。', '？', '！', '；', '：', '、', '.', '?', '!', ';']
     else:
@@ -82,11 +118,21 @@ def split_paragraph(text: str, tokenize, lang="zh", token_max_n=80, token_min_n=
     if comma_split:
         pounc.extend(['，', ','])
 
-    if text[-1] not in pounc:
+    # 检查原始文本是否包含标点符号
+    original_text = text.strip()
+    if not original_text:  # 防止空字符串访问 [-1]
+        return []
+        
+    has_punctuation = any(p in original_text for p in pounc)
+    
+    # 确保文本以标点符号结尾
+    if original_text[-1] not in pounc:
         if lang == "zh":
-            text += "。"
+            text = original_text + "。"
         else:
-            text += "."
+            text = original_text + "."
+    else:
+        text = original_text
 
     st = 0
     utts = []
@@ -100,6 +146,43 @@ def split_paragraph(text: str, tokenize, lang="zh", token_max_n=80, token_min_n=
                 st = i + 2
             else:
                 st = i + 1
+
+    # 如果没有标点符号，需要按长度强制分割
+    if not has_punctuation and len(utts) == 1:
+        original_text = utts[0][:-1]  # 去掉添加的句号
+        utts = []
+        current_pos = 0
+        
+        while current_pos < len(original_text):
+            # 计算当前段的最大长度
+            max_len = token_max_n
+            end_pos = min(current_pos + max_len, len(original_text))
+            
+            # 如果不是最后一段，尝试在合适的位置分割
+            if end_pos < len(original_text):
+                # 修复搜索范围计算
+                search_start = max(current_pos + token_min_n, end_pos - 20)
+                if search_start < end_pos:  # 确保搜索范围有效
+                    # 改进的英文单词边界检测
+                    if lang == "en":
+                        # 使用专门的英文单词边界检测函数
+                        end_pos = find_english_word_boundary(original_text, search_start, end_pos)
+                    else:
+                        # 中文保持原有逻辑
+                        for i in range(end_pos, search_start, -1):
+                            if original_text[i] in [' ', '，', ',', '、', '\t', '\n']:
+                                end_pos = i + 1
+                                break
+                # 如果找不到合适的分割点，就按最大长度分割
+                if end_pos == current_pos + max_len:
+                    end_pos = min(current_pos + max_len, len(original_text))
+            
+            # 防止无限循环
+            if end_pos <= current_pos:
+                end_pos = current_pos + 1
+                
+            utts.append(original_text[current_pos:end_pos] + "。")
+            current_pos = end_pos
 
     final_utts = []
     cur_utt = ""
