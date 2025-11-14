@@ -125,16 +125,10 @@ fi
 print_info "检查 Docker 镜像..."
 if docker images | grep -q "^${IMAGE_NAME}.*${IMAGE_TAG}"; then
     print_success "镜像 ${IMAGE_NAME}:${IMAGE_TAG} 已存在"
-    read -p "是否重新构建镜像？(y/N): " rebuild
-    if [[ $rebuild =~ ^[Yy]$ ]]; then
-        print_info "开始构建 Docker 镜像..."
-        docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -f "$SCRIPT_DIR/Dockerfile" "$PROJECT_ROOT"
-        print_success "镜像构建完成"
-    fi
 else
-    print_warning "镜像 ${IMAGE_NAME}:${IMAGE_TAG} 不存在，开始构建..."
-    docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -f "$SCRIPT_DIR/Dockerfile" "$PROJECT_ROOT"
-    print_success "镜像构建完成"
+    print_error "镜像 ${IMAGE_NAME}:${IMAGE_TAG} 不存在"
+    print_info "请先构建镜像: docker build -t ${IMAGE_NAME}:${IMAGE_TAG} -f \"$SCRIPT_DIR/Dockerfile\" \"$PROJECT_ROOT\""
+    exit 1
 fi
 
 # 检查并停止/删除已存在的容器
@@ -186,7 +180,7 @@ for port in "${PORTS[@]}"; do
     print_info "启动容器 ${container_name} (端口 ${port})..."
     
     # 启动容器（启用端口映射和GPU支持）
-    if docker run -d \
+    run_output=$(docker run -d \
         ${GPU_FLAG} \
         -p ${port}:${port} \
         -v "$MODEL_PATH:/workspace/CosyVoice/pretrained_models" \
@@ -208,7 +202,10 @@ for port in "${PORTS[@]}"; do
                      --port ${port} \
                      --model_dir ${MODEL_DIR} \
                      --max_concurrent ${MAX_CONCURRENT} \
-                     --max_queue_size ${MAX_QUEUE_SIZE}" &> /dev/null; then
+                     --max_queue_size ${MAX_QUEUE_SIZE}" 2>&1)
+    run_exit_code=$?
+    
+    if [ $run_exit_code -eq 0 ]; then
         # 等待一下，然后检查容器是否还在运行
         sleep 2
         if docker ps | grep -q "${container_name}"; then
@@ -217,15 +214,22 @@ for port in "${PORTS[@]}"; do
         else
             print_error "容器 ${container_name} 启动失败（容器已退出）"
             FAILED_PORTS+=($port)
-            # 尝试获取错误日志
-            if docker logs ${container_name} &> /dev/null 2>&1; then
-                print_info "错误日志:"
-                docker logs ${container_name} 2>&1 | tail -10
-            fi
+            # 获取错误日志
+            print_info "容器 ${container_name} 的错误日志:"
+            docker logs ${container_name} 2>&1 | tail -20
+            echo ""
         fi
     else
         print_error "容器 ${container_name} 启动失败"
+        print_info "Docker 运行错误:"
+        echo "$run_output"
         FAILED_PORTS+=($port)
+        # 如果容器被创建但启动失败，尝试获取日志
+        if docker ps -a | grep -q "${container_name}"; then
+            print_info "容器 ${container_name} 的错误日志:"
+            docker logs ${container_name} 2>&1 | tail -20
+            echo ""
+        fi
     fi
 done
 
