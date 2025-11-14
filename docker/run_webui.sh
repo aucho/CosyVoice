@@ -200,9 +200,7 @@ for port in "${PORTS[@]}"; do
                  fi && \
                  python webui.py \
                      --port ${port} \
-                     --model_dir ${MODEL_DIR} \
-                     --max_concurrent ${MAX_CONCURRENT} \
-                     --max_queue_size ${MAX_QUEUE_SIZE}" 2>&1)
+                     --model_dir ${MODEL_DIR}" 2>&1)
     run_exit_code=$?
     
     if [ $run_exit_code -eq 0 ]; then
