@@ -17,7 +17,12 @@ RUN apt-get install -y git build-essential curl wget ffmpeg unzip git git-lfs so
 # conda install and conda forge channel as default
 # ------------------------------------------------------------------
 # Install miniforge
-RUN wget --quiet https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O ~/miniforge.sh && \
+# 使用固定版本号避免检查latest，添加超时和重试机制，显示下载进度
+RUN MINIFORGE_VERSION="24.1.2-3" && \
+    wget --timeout=60 --tries=3 --progress=bar:force:noscroll \
+    https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_VERSION}/Miniforge3-${MINIFORGE_VERSION}-Linux-x86_64.sh -O ~/miniforge.sh || \
+    wget --timeout=60 --tries=3 --progress=bar:force:noscroll \
+    https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O ~/miniforge.sh && \
     /bin/bash ~/miniforge.sh -b -p /opt/conda && \
     rm ~/miniforge.sh && \
     ln -s /opt/conda/etc/profile.d/conda.sh /etc/profile.d/conda.sh && \
