@@ -32,6 +32,8 @@ ENV PATH=/opt/conda/bin:$PATH
 
 # 配置 conda 使用清华大学镜像源加速，移除默认频道避免 TOS 问题
 RUN conda config --remove channels defaults || true && \
+    conda config --remove channels https://repo.anaconda.com/pkgs/main || true && \
+    conda config --remove channels https://repo.anaconda.com/pkgs/r || true && \
     conda config --add channels https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge && \
     conda config --add channels conda-forge && \
     conda config --set channel_priority strict && \
@@ -40,7 +42,8 @@ RUN conda config --remove channels defaults || true && \
 # ~conda
 # ==================================================================
 
-RUN conda create -y -n ${VENV} python=3.10
+# 使用 --override-channels 强制只使用 conda-forge，避免 TOS 问题
+RUN conda create -y -n ${VENV} --override-channels -c conda-forge python=3.10
 ENV CONDA_DEFAULT_ENV=${VENV}
 ENV PATH=/opt/conda/bin:/opt/conda/envs/${VENV}/bin:$PATH
 
