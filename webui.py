@@ -40,6 +40,9 @@ max_val = 0.8
 
 # 全局停止标志
 stop_generation = threading.Event()
+# 任务停止标志字典，用于管理多个并发任务
+task_stop_flags = {}
+task_stop_lock = threading.Lock()
 
 def generate_seed():
     seed = random.randint(1, 100000000)
@@ -51,6 +54,10 @@ def generate_seed():
 def stop_generation_func():
     """停止生成函数"""
     stop_generation.set()
+    # 停止所有任务
+    with task_stop_lock:
+        for task_id in task_stop_flags:
+            task_stop_flags[task_id].set()
     return "生成已停止"
 
 def postprocess(speech, top_db=60, hop_length=220, win_length=440):
@@ -157,9 +164,17 @@ def process_text_split(input_text, words_per_segment):
 def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dropdown, prompt_text, 
                          prompt_wav_upload, prompt_wav_record, instruct_text, seed, stream, speed):
     """批量生成音频并保存到指定目录"""
+    # 为当前任务创建独立的停止标志
+    task_id = threading.current_thread().ident
+    task_stop_event = threading.Event()
+    with task_stop_lock:
+        task_stop_flags[task_id] = task_stop_event
+    
     if not text_segments or len(text_segments) == 0:
         empty_audio = np.zeros(1000, dtype=np.float32)
         yield "没有文本需要生成", (cosyvoice.sample_rate, empty_audio)
+        with task_stop_lock:
+            task_stop_flags.pop(task_id, None)
         return
     
     # 规范化输出目录路径（处理Windows路径）
@@ -217,15 +232,18 @@ def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dro
     else:
         prompt_wav = None
     
-    # 重置停止标志
+    # 重置全局停止标志（仅用于兼容旧代码）
     stop_generation.clear()
+    # 重置当前任务的停止标志
+    task_stop_event.clear()
     
     saved_count = 0
     empty_audio = np.zeros(1000, dtype=np.float32)
     
     try:
         for idx, tts_text in enumerate(text_segments, 1):
-            if stop_generation.is_set():
+            # 检查全局停止标志或当前任务停止标志
+            if stop_generation.is_set() or task_stop_event.is_set():
                 yield f"生成已停止（已生成 {saved_count}/{total_segments} 个音频）", (cosyvoice.sample_rate, empty_audio)
                 break
             
@@ -439,104 +457,127 @@ def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dro
         logging.error(f'批量生成过程中出现错误: {e}')
         yield f"批量生成出错: {str(e)}", (cosyvoice.sample_rate, empty_audio)
     finally:
+        # 清理当前任务的停止标志
+        with task_stop_lock:
+            task_stop_flags.pop(task_id, None)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
 def generate_audio(tts_text, mode_checkbox_group, sft_dropdown, prompt_text, prompt_wav_upload, prompt_wav_record, instruct_text,
                    seed, stream, speed):
-    # 重置停止标志
-    stop_generation.clear()
+    # 为当前任务创建独立的停止标志
+    task_id = threading.current_thread().ident
+    task_stop_event = threading.Event()
+    with task_stop_lock:
+        task_stop_flags[task_id] = task_stop_event
     
-    if prompt_wav_upload is not None:
-        prompt_wav = prompt_wav_upload
-    elif prompt_wav_record is not None:
-        prompt_wav = prompt_wav_record
-    else:
-        prompt_wav = None
-    # if instruct mode, please make sure that model is iic/CosyVoice-300M-Instruct and not cross_lingual mode
-    if mode_checkbox_group in ['自然语言控制']:
-        if cosyvoice.instruct is False:
-            gr.Warning('您正在使用自然语言控制模式, {}模型不支持此模式, 请使用iic/CosyVoice-300M-Instruct模型'.format(args.model_dir))
-            yield (cosyvoice.sample_rate, default_data)
-        if instruct_text == '':
-            gr.Warning('您正在使用自然语言控制模式, 请输入instruct文本')
-            yield (cosyvoice.sample_rate, default_data)
-        if prompt_wav is not None or prompt_text != '':
-            gr.Info('您正在使用自然语言控制模式, prompt音频/prompt文本会被忽略')
-    # if cross_lingual mode, please make sure that model is iic/CosyVoice-300M and tts_text prompt_text are different language
-    if mode_checkbox_group in ['跨语种复刻']:
-        if cosyvoice.instruct is True:
-            gr.Warning('您正在使用跨语种复刻模式, {}模型不支持此模式, 请使用iic/CosyVoice-300M模型'.format(args.model_dir))
-            yield (cosyvoice.sample_rate, default_data)
-        if instruct_text != '':
-            gr.Info('您正在使用跨语种复刻模式, instruct文本会被忽略')
-        if prompt_wav is None:
-            gr.Warning('您正在使用跨语种复刻模式, 请提供prompt音频')
-            yield (cosyvoice.sample_rate, default_data)
-        gr.Info('您正在使用跨语种复刻模式, 请确保合成文本和prompt文本为不同语言')
-    # if in zero_shot cross_lingual, please make sure that prompt_text and prompt_wav meets requirements
-    if mode_checkbox_group in ['3s极速复刻', '跨语种复刻']:
-        if prompt_wav is None:
-            gr.Warning('prompt音频为空，您是否忘记输入prompt音频？')
-            yield (cosyvoice.sample_rate, default_data)
-        if torchaudio.info(prompt_wav).sample_rate < prompt_sr:
-            gr.Warning('prompt音频采样率{}低于{}'.format(torchaudio.info(prompt_wav).sample_rate, prompt_sr))
-            yield (cosyvoice.sample_rate, default_data)
-    # sft mode only use sft_dropdown
-    if mode_checkbox_group in ['预训练音色']:
-        if instruct_text != '' or prompt_wav is not None or prompt_text != '':
-            gr.Info('您正在使用预训练音色模式，prompt文本/prompt音频/instruct文本会被忽略！')
-        if sft_dropdown == '':
-            gr.Warning('没有可用的预训练音色！')
-            yield (cosyvoice.sample_rate, default_data)
-    # zero_shot mode only use prompt_wav prompt text
-    if mode_checkbox_group in ['3s极速复刻']:
-        if prompt_text == '':
-            gr.Warning('prompt文本为空，您是否忘记输入prompt文本？')
-            yield (cosyvoice.sample_rate, default_data)
-        if instruct_text != '':
-            gr.Info('您正在使用3s极速复刻模式，预训练音色/instruct文本会被忽略！')
-
     try:
-        if mode_checkbox_group == '预训练音色':
-            logging.info('get sft inference request')
-            set_all_random_seed(seed)
-            for i in cosyvoice.inference_sft(tts_text, sft_dropdown, stream=stream, speed=speed):
-                if stop_generation.is_set():
-                    logging.info('生成被用户停止')
-                    break
-                yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
-        elif mode_checkbox_group == '3s极速复刻':
-            logging.info('get zero_shot inference request')
-            prompt_speech_16k = postprocess(load_wav(prompt_wav, prompt_sr))
-            set_all_random_seed(seed)
-            for i in cosyvoice.inference_zero_shot(tts_text, prompt_text, prompt_speech_16k, stream=stream, speed=speed):
-                if stop_generation.is_set():
-                    logging.info('生成被用户停止')
-                    break
-                yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
-        elif mode_checkbox_group == '跨语种复刻':
-            logging.info('get cross_lingual inference request')
-            prompt_speech_16k = postprocess(load_wav(prompt_wav, prompt_sr))
-            set_all_random_seed(seed)
-            for i in cosyvoice.inference_cross_lingual(tts_text, prompt_speech_16k, stream=stream, speed=speed):
-                if stop_generation.is_set():
-                    logging.info('生成被用户停止')
-                    break
-                yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
+        # 重置停止标志
+        stop_generation.clear()
+        task_stop_event.clear()
+        
+        if prompt_wav_upload is not None:
+            prompt_wav = prompt_wav_upload
+        elif prompt_wav_record is not None:
+            prompt_wav = prompt_wav_record
         else:
-            logging.info('get instruct inference request')
-            set_all_random_seed(seed)
-            for i in cosyvoice.inference_instruct(tts_text, sft_dropdown, instruct_text, stream=stream, speed=speed):
-                if stop_generation.is_set():
-                    logging.info('生成被用户停止')
-                    break
-                yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
-    except Exception as e:
-        logging.error(f'生成过程中出现错误: {e}')
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        yield (cosyvoice.sample_rate, default_data)
+            prompt_wav = None
+        # if instruct mode, please make sure that model is iic/CosyVoice-300M-Instruct and not cross_lingual mode
+        if mode_checkbox_group in ['自然语言控制']:
+            if cosyvoice.instruct is False:
+                gr.Warning('您正在使用自然语言控制模式, {}模型不支持此模式, 请使用iic/CosyVoice-300M-Instruct模型'.format(args.model_dir))
+                yield (cosyvoice.sample_rate, default_data)
+                return
+            if instruct_text == '':
+                gr.Warning('您正在使用自然语言控制模式, 请输入instruct文本')
+                yield (cosyvoice.sample_rate, default_data)
+                return
+            if prompt_wav is not None or prompt_text != '':
+                gr.Info('您正在使用自然语言控制模式, prompt音频/prompt文本会被忽略')
+        # if cross_lingual mode, please make sure that model is iic/CosyVoice-300M and tts_text prompt_text are different language
+        if mode_checkbox_group in ['跨语种复刻']:
+            if cosyvoice.instruct is True:
+                gr.Warning('您正在使用跨语种复刻模式, {}模型不支持此模式, 请使用iic/CosyVoice-300M模型'.format(args.model_dir))
+                yield (cosyvoice.sample_rate, default_data)
+                return
+            if instruct_text != '':
+                gr.Info('您正在使用跨语种复刻模式, instruct文本会被忽略')
+            if prompt_wav is None:
+                gr.Warning('您正在使用跨语种复刻模式, 请提供prompt音频')
+                yield (cosyvoice.sample_rate, default_data)
+                return
+            gr.Info('您正在使用跨语种复刻模式, 请确保合成文本和prompt文本为不同语言')
+        # if in zero_shot cross_lingual, please make sure that prompt_text and prompt_wav meets requirements
+        if mode_checkbox_group in ['3s极速复刻', '跨语种复刻']:
+            if prompt_wav is None:
+                gr.Warning('prompt音频为空，您是否忘记输入prompt音频？')
+                yield (cosyvoice.sample_rate, default_data)
+                return
+            if torchaudio.info(prompt_wav).sample_rate < prompt_sr:
+                gr.Warning('prompt音频采样率{}低于{}'.format(torchaudio.info(prompt_wav).sample_rate, prompt_sr))
+                yield (cosyvoice.sample_rate, default_data)
+                return
+        # sft mode only use sft_dropdown
+        if mode_checkbox_group in ['预训练音色']:
+            if instruct_text != '' or prompt_wav is not None or prompt_text != '':
+                gr.Info('您正在使用预训练音色模式，prompt文本/prompt音频/instruct文本会被忽略！')
+            if sft_dropdown == '':
+                gr.Warning('没有可用的预训练音色！')
+                yield (cosyvoice.sample_rate, default_data)
+                return
+        # zero_shot mode only use prompt_wav prompt text
+        if mode_checkbox_group in ['3s极速复刻']:
+            if prompt_text == '':
+                gr.Warning('prompt文本为空，您是否忘记输入prompt文本？')
+                yield (cosyvoice.sample_rate, default_data)
+                return
+            if instruct_text != '':
+                gr.Info('您正在使用3s极速复刻模式，预训练音色/instruct文本会被忽略！')
+
+        try:
+            if mode_checkbox_group == '预训练音色':
+                logging.info('get sft inference request')
+                set_all_random_seed(seed)
+                for i in cosyvoice.inference_sft(tts_text, sft_dropdown, stream=stream, speed=speed):
+                    if stop_generation.is_set() or task_stop_event.is_set():
+                        logging.info('生成被用户停止')
+                        break
+                    yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
+            elif mode_checkbox_group == '3s极速复刻':
+                logging.info('get zero_shot inference request')
+                prompt_speech_16k = postprocess(load_wav(prompt_wav, prompt_sr))
+                set_all_random_seed(seed)
+                for i in cosyvoice.inference_zero_shot(tts_text, prompt_text, prompt_speech_16k, stream=stream, speed=speed):
+                    if stop_generation.is_set() or task_stop_event.is_set():
+                        logging.info('生成被用户停止')
+                        break
+                    yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
+            elif mode_checkbox_group == '跨语种复刻':
+                logging.info('get cross_lingual inference request')
+                prompt_speech_16k = postprocess(load_wav(prompt_wav, prompt_sr))
+                set_all_random_seed(seed)
+                for i in cosyvoice.inference_cross_lingual(tts_text, prompt_speech_16k, stream=stream, speed=speed):
+                    if stop_generation.is_set() or task_stop_event.is_set():
+                        logging.info('生成被用户停止')
+                        break
+                    yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
+            else:
+                logging.info('get instruct inference request')
+                set_all_random_seed(seed)
+                for i in cosyvoice.inference_instruct(tts_text, sft_dropdown, instruct_text, stream=stream, speed=speed):
+                    if stop_generation.is_set() or task_stop_event.is_set():
+                        logging.info('生成被用户停止')
+                        break
+                    yield (cosyvoice.sample_rate, i['tts_speech'].numpy().flatten())
+        except Exception as e:
+            logging.error(f'生成过程中出现错误: {e}')
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            yield (cosyvoice.sample_rate, default_data)
+    finally:
+        # 清理当前任务的停止标志
+        with task_stop_lock:
+            task_stop_flags.pop(task_id, None)
 
 def format_path_for_display(path):
     """将路径格式化显示，将 /workspace 替换为 C:\\repo\\CosyVoice"""
@@ -655,7 +696,10 @@ def main():
         )
         stop_button.click(stop_generation_func, inputs=[], outputs=[status_text])
         mode_checkbox_group.change(fn=change_instruction, inputs=[mode_checkbox_group], outputs=[instruction_text])
-    demo.queue(max_size=4, default_concurrency_limit=2)
+    # 增加并发限制以支持多个网页同时运行多个任务
+    # max_size: 队列最大长度，default_concurrency_limit: 默认并发数
+    # 可以根据GPU显存和性能调整这些值
+    demo.queue(max_size=args.max_queue_size, default_concurrency_limit=args.max_concurrent)
     demo.launch(server_name='0.0.0.0', server_port=args.port)
 
 if __name__ == '__main__':
@@ -667,6 +711,14 @@ if __name__ == '__main__':
                         type=str,
                         default='pretrained_models/CosyVoice2-0.5B',
                         help='local path or modelscope repo id')
+    parser.add_argument('--max_concurrent',
+                        type=int,
+                        default=8,
+                        help='最大并发任务数（默认8，可根据GPU显存调整）')
+    parser.add_argument('--max_queue_size',
+                        type=int,
+                        default=20,
+                        help='任务队列最大长度（默认20）')
     args = parser.parse_args()
     try:
         cosyvoice = CosyVoice(args.model_dir)
