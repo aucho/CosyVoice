@@ -133,32 +133,20 @@ fi
 
 # 检查并停止/删除已存在的容器
 print_info "检查容器状态..."
-if [ "$MULTI_MODE" = true ]; then
-    # 多实例模式：清理所有相关容器
-    for port in "${PORTS[@]}"; do
-        container_name="${CONTAINER_NAME_PREFIX}-${port}"
-        if docker ps -a | grep -q "${container_name}"; then
-            if docker ps | grep -q "${container_name}"; then
-                print_warning "容器 ${container_name} 正在运行，正在停止..."
-                docker stop ${container_name} &> /dev/null || true
-            fi
-            print_info "删除旧容器 ${container_name}..."
-            docker rm ${container_name} &> /dev/null || true
-        fi
-    done
-    print_success "旧容器清理完成"
-else
-    # 单实例模式
-    container_name="${CONTAINER_NAME_PREFIX}-${DEFAULT_PORT}"
+# 统一处理所有端口对应的容器
+for port in "${PORTS[@]}"; do
+    container_name="${CONTAINER_NAME_PREFIX}-${port}"
     if docker ps -a | grep -q "${container_name}"; then
         if docker ps | grep -q "${container_name}"; then
             print_warning "容器 ${container_name} 正在运行，正在停止..."
-            docker stop ${container_name}
+            docker stop ${container_name} &> /dev/null || true
         fi
-        print_info "删除旧容器..."
-        docker rm ${container_name}
-        print_success "旧容器已删除"
+        print_info "删除旧容器 ${container_name}..."
+        docker rm ${container_name} &> /dev/null || true
     fi
+done
+if [ ${#PORTS[@]} -gt 0 ]; then
+    print_success "旧容器清理完成"
 fi
 
 # 创建模型目录（如果不存在）
