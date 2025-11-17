@@ -190,7 +190,7 @@ for port in "${PORTS[@]}"; do
     if [ "$GPU_ENABLED" = true ] && [ ${#GPU_INDICES[@]} -gt 0 ]; then
         assigned_gpu=${GPU_INDICES[$((INSTANCE_INDEX % ${#GPU_INDICES[@]}))]}
         gpu_flag_instance="--gpus device=${assigned_gpu}"
-        gpu_env_instance="-e CUDA_VISIBLE_DEVICES=${assigned_gpu}"
+        gpu_env_instance=""
         print_info "容器 ${container_name} 分配到 GPU ${assigned_gpu}"
     elif [ "$GPU_ENABLED" = true ]; then
         gpu_flag_instance="${GPU_FALLBACK_FLAG}"
