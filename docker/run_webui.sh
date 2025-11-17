@@ -116,10 +116,12 @@ print_info "检查 GPU 支持..."
 GPU_ENABLED=false
 GPU_FALLBACK_FLAG=""
 GPU_INDICES=()
+DOCKER_RUNTIME=""
 
 if docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi &> /dev/null; then
     GPU_ENABLED=true
     GPU_FALLBACK_FLAG="--gpus all"
+    DOCKER_RUNTIME="--runtime=nvidia"
     print_success "检测到 GPU 支持，将启用 GPU"
     if command -v nvidia-smi &> /dev/null; then
         mapfile -t GPU_INDICES < <(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null)
@@ -199,10 +201,10 @@ for port in "${PORTS[@]}"; do
     
     # 启动容器（启用端口映射和GPU支持）
     run_output=$(docker run -d \
+        ${DOCKER_RUNTIME} \
         ${gpu_flag_instance} \
         ${gpu_env_instance} \
         -p ${port}:${port} \
-        -v "$PROJECT_ROOT:/workspace/CosyVoice" \
         -v "$MODEL_PATH:/workspace/CosyVoice/pretrained_models" \
         --name ${container_name} \
         --restart unless-stopped \
