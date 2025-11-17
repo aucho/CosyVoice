@@ -55,6 +55,19 @@ RUN git clone --recursive https://github.com/aucho/CosyVoice.git
 
 RUN conda activate ${VENV} && conda install -y --override-channels -c conda-forge pynini==2.1.5
 RUN conda activate ${VENV} && cd CosyVoice && \
-    pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host=mirrors.aliyun.com --no-cache-dir
+    pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host=mirrors.aliyun.com
+
+# 安装 ttsfrd（可选，用于更好的文本规范化性能）
+# 注意：需要确保 pretrained_models/CosyVoice-ttsfrd 目录已存在且包含相应文件
+RUN if [ -d "/workspace/CosyVoice/pretrained_models/CosyVoice-ttsfrd" ] && \
+        [ -f "/workspace/CosyVoice/pretrained_models/CosyVoice-ttsfrd/resource.zip" ]; then \
+        conda activate ${VENV} && \
+        cd /workspace/CosyVoice/pretrained_models/CosyVoice-ttsfrd && \
+        unzip -q resource.zip -d . && \
+        pip install ttsfrd_dependency-0.1-py3-none-any.whl && \
+        pip install ttsfrd-0.4.2-cp310-cp310-linux_x86_64.whl; \
+    else \
+        echo "ttsfrd 模型文件不存在，跳过安装（将使用 wetext 作为默认）"; \
+    fi
 
 WORKDIR /workspace/CosyVoice
