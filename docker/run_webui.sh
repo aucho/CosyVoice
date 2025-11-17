@@ -113,11 +113,26 @@ print_success "Docker 环境检查通过"
 
 # 检查 GPU 支持
 print_info "检查 GPU 支持..."
+GPU_ENABLED=false
+GPU_FALLBACK_FLAG=""
+GPU_INDICES=()
+
 if docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi &> /dev/null; then
-    GPU_FLAG="--gpus all"
+    GPU_ENABLED=true
+    GPU_FALLBACK_FLAG="--gpus all"
     print_success "检测到 GPU 支持，将启用 GPU"
+    if command -v nvidia-smi &> /dev/null; then
+        mapfile -t GPU_INDICES < <(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null)
+        if [ ${#GPU_INDICES[@]} -eq 0 ]; then
+            print_warning "无法列出具体 GPU，将默认暴露全部 GPU"
+        else
+            print_info "可用 GPU: ${GPU_INDICES[*]}"
+        fi
+    else
+        print_warning "宿主机缺少 nvidia-smi，无法自动分配 GPU，将默认暴露全部 GPU"
+    fi
 else
-    GPU_FLAG="--gpus all"
+    GPU_FALLBACK_FLAG="--gpus all"
     print_warning "GPU 检测失败，但仍将尝试启用 GPU（如果失败将回退到 CPU）"
 fi
 
@@ -162,15 +177,32 @@ SUCCESS_COUNT=0
 FAILED_PORTS=()
 
 print_info "开始启动 ${#PORTS[@]} 个容器实例..."
+INSTANCE_INDEX=0
 
 for port in "${PORTS[@]}"; do
     container_name="${CONTAINER_NAME_PREFIX}-${port}"
     print_info "启动容器 ${container_name} (端口 ${port})..."
     
+    gpu_flag_instance=""
+    gpu_env_instance=""
+    if [ "$GPU_ENABLED" = true ] && [ ${#GPU_INDICES[@]} -gt 0 ]; then
+        assigned_gpu=${GPU_INDICES[$((INSTANCE_INDEX % ${#GPU_INDICES[@]}))]}
+        gpu_flag_instance="--gpus device=${assigned_gpu}"
+        gpu_env_instance="-e CUDA_VISIBLE_DEVICES=${assigned_gpu}"
+        print_info "容器 ${container_name} 分配到 GPU ${assigned_gpu}"
+    elif [ "$GPU_ENABLED" = true ]; then
+        gpu_flag_instance="${GPU_FALLBACK_FLAG}"
+        print_warning "容器 ${container_name} 无法逐卡分配，将暴露所有 GPU"
+    else
+        print_warning "容器 ${container_name} 将在 CPU 或 docker 默认环境下运行"
+    fi
+    
     # 启动容器（启用端口映射和GPU支持）
     run_output=$(docker run -d \
-        ${GPU_FLAG} \
+        ${gpu_flag_instance} \
+        ${gpu_env_instance} \
         -p ${port}:${port} \
+        -v "$PROJECT_ROOT:/workspace/CosyVoice" \
         -v "$MODEL_PATH:/workspace/CosyVoice/pretrained_models" \
         --name ${container_name} \
         --restart unless-stopped \
@@ -217,6 +249,7 @@ for port in "${PORTS[@]}"; do
             echo ""
         fi
     fi
+    ((INSTANCE_INDEX++))
 done
 
 echo ""
