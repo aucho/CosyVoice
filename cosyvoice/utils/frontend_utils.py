@@ -113,10 +113,59 @@ def split_paragraph(text: str, tokenize, lang="zh", token_max_n=80, token_min_n=
 
     if lang == "zh":
         pounc = ['。', '？', '！', '；', '：', '、', '.', '?', '!', ';']
+        default_split_punc = '。'
     else:
         pounc = ['.', '?', '!', ';', ':']
+        default_split_punc = '.'
     if comma_split:
         pounc.extend(['，', ','])
+
+    def force_split_segment(segment: str):
+        """强制切分单条过长的语句，避免超出 token_max_n。"""
+        if not segment:
+            return []
+        tail_punc = segment[-1] if segment[-1] in pounc else ""
+        body = segment[:-1] if tail_punc else segment
+        if not body:
+            return [segment]
+
+        pieces = []
+        current_pos = 0
+        while current_pos < len(body):
+            end_pos = min(current_pos + token_max_n, len(body))
+
+            if end_pos < len(body):
+                search_start = max(current_pos + token_min_n, end_pos - 20)
+                if search_start < end_pos:
+                    if lang == "en":
+                        end_pos = find_english_word_boundary(body, search_start, end_pos)
+                    else:
+                        for i in range(end_pos, search_start, -1):
+                            if body[i] in [' ', '，', ',', '、', '\t', '\n']:
+                                end_pos = i + 1
+                                break
+                if end_pos == current_pos + token_max_n:
+                    end_pos = min(current_pos + token_max_n, len(body))
+
+            if end_pos <= current_pos:
+                end_pos = min(current_pos + token_max_n, len(body))
+                if end_pos <= current_pos:
+                    end_pos = current_pos + 1
+
+            pieces.append(body[current_pos:end_pos])
+            current_pos = end_pos
+
+        if not pieces:
+            return [segment]
+
+        result = []
+        for idx, piece in enumerate(pieces):
+            if idx == len(pieces) - 1:
+                current_punc = tail_punc if tail_punc else default_split_punc
+            else:
+                current_punc = default_split_punc
+            result.append(piece + current_punc)
+        return result
 
     # 检查原始文本是否包含标点符号
     original_text = text.strip()
@@ -183,6 +232,15 @@ def split_paragraph(text: str, tokenize, lang="zh", token_max_n=80, token_min_n=
                 
             utts.append(original_text[current_pos:end_pos] + "。")
             current_pos = end_pos
+
+    # 对于包含标点但仍然过长的语句，继续切分
+    processed_utts = []
+    for utt in utts:
+        if calc_utt_length(utt) > token_max_n * 1:
+            processed_utts.extend(force_split_segment(utt))
+        else:
+            processed_utts.append(utt)
+    utts = processed_utts
 
     final_utts = []
     cur_utt = ""
