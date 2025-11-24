@@ -125,9 +125,21 @@ def split_text_by_words(text, words_per_segment):
                     segment_end += len(word_match.group())
                 else:
                     segment_end += 1
+            # 数字序列也视作一个“词”，避免日志/时间戳无法切分
+            elif re.match(r'[0-9]', char):
+                digit_match = re.match(r'[0-9]+', text[segment_end:])
+                if digit_match:
+                    word_count += 1
+                    segment_end += len(digit_match.group())
+                else:
+                    segment_end += 1
             else:
-                # 其他字符（标点、空格等）继续
-                segment_end += 1
+                # 其他非空白字符也占用计数，确保无标点/无字母文本能被强制切分
+                if char.isspace():
+                    segment_end += 1
+                else:
+                    word_count += 1
+                    segment_end += 1
         
         # 如果还没达到单词数限制就已到文本末尾，直接取剩余部分
         if segment_end >= text_length:
