@@ -17,6 +17,7 @@ import argparse
 import gradio as gr
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torchaudio
 import random
 import librosa
@@ -161,8 +162,97 @@ def process_text_split(input_text, words_per_segment):
     segments = split_text_by_words(input_text, words_per_segment)
     return segments, len(segments)
 
+
+def sample_speed_with_variation(base_speed, enable_variation):
+    """根据需求随机生成语速波动"""
+    if not enable_variation:
+        return base_speed
+    # 6%-14% 波动，正负随机
+    variation = random.uniform(0.06, 0.14)
+    direction = random.choice([-1, 1])
+    varied_speed = base_speed * (1 + direction * variation)
+    # 保证仍在可用范围
+    return max(0.5, min(2.0, varied_speed))
+
+
+def apply_tail_pitch_shift(waveform, sample_rate):
+    """在句尾随机上扬/下沉语调"""
+    if waveform.numel() == 0:
+        return waveform
+    tail_duration = min(0.4, max(0.1, waveform.shape[-1] / sample_rate * 0.2))
+    tail_samples = max(1, int(sample_rate * tail_duration))
+    tail = waveform[-tail_samples:].unsqueeze(0)
+    semitone_shift = random.uniform(0.2, 0.4)
+    if random.choice([True, False]):
+        semitone_shift = -semitone_shift
+    try:
+        shifted = torchaudio.functional.pitch_shift(
+            tail,
+            sample_rate=sample_rate,
+            n_steps=semitone_shift,
+            bins_per_octave=12
+        ).squeeze(0)
+        if shifted.shape[-1] != tail_samples:
+            if shifted.shape[-1] > tail_samples:
+                shifted = shifted[:tail_samples]
+            else:
+                shifted = F.pad(shifted, (0, tail_samples - shifted.shape[-1]))
+        waveform[-tail_samples:] = shifted
+    except Exception as exc:
+        logging.warning(f'尾部语调调整失败: {exc}')
+    return waveform
+
+
+def create_breath_segment(sample_rate):
+    """生成轻微呼吸音"""
+    duration = random.uniform(0.12, 0.25)
+    intensity = random.uniform(0.15, 0.35)
+    breath_len = max(1, int(sample_rate * duration))
+    breath = torch.randn(breath_len) * 0.015 * intensity
+    window = torch.hann_window(breath_len)
+    return breath * window
+
+
+def append_breath_and_pause(waveform, sample_rate, add_breath=True):
+    """在段落末尾加入呼吸与停顿"""
+    pause_duration = random.uniform(0.2, 0.5)
+    pause = torch.zeros(max(1, int(sample_rate * pause_duration)))
+    segments = [waveform]
+    if add_breath:
+        breath = create_breath_segment(sample_rate)
+        segments.append(breath)
+    segments.append(pause)
+    return torch.cat(segments)
+
+
+def add_environment_noise(waveform):
+    """添加轻微环境噪声"""
+    if waveform.numel() == 0:
+        return waveform
+    noise_level = random.uniform(0.04, 0.06)
+    env_noise = torch.randn_like(waveform) * 0.02
+    mixed = waveform * (1 - noise_level) + env_noise * noise_level
+    max_val = mixed.abs().max()
+    if max_val > 1.0:
+        mixed = mixed / max_val
+    return mixed
+
+
+def apply_unstable_speech_effects(audio_tensor, sample_rate, add_trailing_pause):
+    """应用真人随机讲话效果"""
+    if audio_tensor.dim() == 2:
+        waveform = audio_tensor.squeeze(0).detach().cpu()
+    else:
+        waveform = audio_tensor.detach().cpu()
+    waveform = apply_tail_pitch_shift(waveform, sample_rate)
+    waveform = add_environment_noise(waveform)
+    if add_trailing_pause:
+        waveform = append_breath_and_pause(waveform, sample_rate, add_breath=True)
+    return waveform.unsqueeze(0)
+
 def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dropdown, prompt_text, 
-                         prompt_wav_upload, prompt_wav_record, instruct_text, seed, stream, speed):
+                         prompt_wav_upload, prompt_wav_record, instruct_text, seed, stream, speed,
+                         enable_unstable_effects=False):
     """批量生成音频并保存到指定目录"""
     # 为当前任务创建独立的停止标志
     task_id = threading.current_thread().ident
@@ -254,13 +344,14 @@ def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dro
             yield f"正在生成第 {idx}/{total_segments} 个音频...", (cosyvoice.sample_rate, empty_audio), download_file_path
             
             try:
+                current_speed = sample_speed_with_variation(speed, enable_unstable_effects)
                 # 生成音频
                 audio_data = None
                 audio_chunks = []  # 收集所有音频片段
                 
                 if mode_checkbox_group == '预训练音色':
                     set_all_random_seed(seed)
-                    for i in cosyvoice.inference_sft(tts_text, sft_dropdown, stream=False, speed=speed):
+                    for i in cosyvoice.inference_sft(tts_text, sft_dropdown, stream=False, speed=current_speed):
                         # 收集所有音频片段，不要只取第一个
                         if 'tts_speech' in i:
                             audio_chunks.append(i['tts_speech'])
@@ -269,7 +360,7 @@ def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dro
                         continue
                     prompt_speech_16k = postprocess(load_wav(prompt_wav, prompt_sr))
                     set_all_random_seed(seed)
-                    for i in cosyvoice.inference_zero_shot(tts_text, prompt_text, prompt_speech_16k, stream=False, speed=speed):
+                    for i in cosyvoice.inference_zero_shot(tts_text, prompt_text, prompt_speech_16k, stream=False, speed=current_speed):
                         if 'tts_speech' in i:
                             audio_chunks.append(i['tts_speech'])
                 elif mode_checkbox_group == '跨语种复刻':
@@ -277,12 +368,12 @@ def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dro
                         continue
                     prompt_speech_16k = postprocess(load_wav(prompt_wav, prompt_sr))
                     set_all_random_seed(seed)
-                    for i in cosyvoice.inference_cross_lingual(tts_text, prompt_speech_16k, stream=False, speed=speed):
+                    for i in cosyvoice.inference_cross_lingual(tts_text, prompt_speech_16k, stream=False, speed=current_speed):
                         if 'tts_speech' in i:
                             audio_chunks.append(i['tts_speech'])
                 else:  # 自然语言控制
                     set_all_random_seed(seed)
-                    for i in cosyvoice.inference_instruct(tts_text, sft_dropdown, instruct_text, stream=False, speed=speed):
+                    for i in cosyvoice.inference_instruct(tts_text, sft_dropdown, instruct_text, stream=False, speed=current_speed):
                         if 'tts_speech' in i:
                             audio_chunks.append(i['tts_speech'])
                 
@@ -319,6 +410,14 @@ def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dro
                         # 其他情况，尝试flatten并unsqueeze
                         audio_data = audio_data.flatten().unsqueeze(0)
                     
+                    # 应用真人随机讲话效果
+                    if enable_unstable_effects:
+                        audio_data = apply_unstable_speech_effects(
+                            audio_data,
+                            cosyvoice.sample_rate,
+                            add_trailing_pause=(idx != total_segments)
+                        )
+
                     # 保存音频
                     audio_path = save_dir / f"{idx:04d}.wav"
                     try:
@@ -629,6 +728,11 @@ def main():
 
         # 目录选择
         output_dir = gr.Textbox(label="输出目录", value="./audios", interactive=True)
+        unstable_speech = gr.Checkbox(
+            label="真人随机语气增强",
+            value=False,
+            info="开启后将自动加入语速波动、呼吸、环境噪声、随机停顿等效果"
+        )
         
         with gr.Row():
             generate_button = gr.Button("开始生成", variant="primary")
@@ -681,12 +785,13 @@ def main():
             seed = args[107]
             stream = args[108]
             speed = args[109]
+            unstable_mode = args[110]
             
             # 调用批量生成函数
             for status, audio, download_path in generate_batch_audio(
                 text_segments, output_dir_path, mode_checkbox_group, sft_dropdown,
                 prompt_text, prompt_wav_upload, prompt_wav_record, instruct_text,
-                seed, stream, speed
+                seed, stream, speed, enable_unstable_effects=unstable_mode
             ):
                 yield status, audio, download_path
         
@@ -694,7 +799,7 @@ def main():
         generate_button.click(
             batch_generate_wrapper,
             inputs=[*text_segments_list, output_dir, mode_checkbox_group, sft_dropdown, prompt_text, 
-                   prompt_wav_upload, prompt_wav_record, instruct_text, seed, stream, speed],
+                   prompt_wav_upload, prompt_wav_record, instruct_text, seed, stream, speed, unstable_speech],
             outputs=[status_text, audio_output, download_file]
         )
         stop_button.click(stop_generation_func, inputs=[], outputs=[status_text])
