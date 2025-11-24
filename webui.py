@@ -241,7 +241,7 @@ def add_environment_noise(waveform):
     """添加轻微环境噪声"""
     if waveform.numel() == 0:
         return waveform
-    noise_level = random.uniform(0.04, 0.06)
+    noise_level = random.uniform(0.04, 0.08)
     env_noise = torch.randn_like(waveform) * 0.02
     mixed = waveform * (1 - noise_level) + env_noise * noise_level
     max_val = mixed.abs().max()
@@ -273,8 +273,7 @@ def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dro
         task_stop_flags[task_id] = task_stop_event
     
     if not text_segments or len(text_segments) == 0:
-        empty_audio = np.zeros(1000, dtype=np.float32)
-        yield "没有文本需要生成", (cosyvoice.sample_rate, empty_audio), None
+        yield "没有文本需要生成", None
         with task_stop_lock:
             task_stop_flags.pop(task_id, None)
         return
@@ -314,14 +313,12 @@ def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dro
     try:
         save_dir.mkdir(parents=True, exist_ok=True)
         logging.info(f'创建保存目录: {save_dir}')
-        empty_audio = np.zeros(1000, dtype=np.float32)
         display_path = format_path_for_display(save_dir.resolve())
-        yield f"保存目录已创建: {display_path}", (cosyvoice.sample_rate, empty_audio), None
+        yield f"保存目录已创建: {display_path}", None
     except Exception as e:
         error_msg = f"无法创建保存目录 {save_dir}: {str(e)}"
         logging.error(error_msg)
-        empty_audio = np.zeros(1000, dtype=np.float32)
-        yield error_msg, (cosyvoice.sample_rate, empty_audio), None
+        yield error_msg, None
         return
     
     total_segments = len(text_segments)
@@ -340,20 +337,19 @@ def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dro
     task_stop_event.clear()
     
     saved_count = 0
-    empty_audio = np.zeros(1000, dtype=np.float32)
     download_file_path = None
     
     try:
         for idx, tts_text in enumerate(text_segments, 1):
             # 检查全局停止标志或当前任务停止标志
             if stop_generation.is_set() or task_stop_event.is_set():
-                yield f"生成已停止（已生成 {saved_count}/{total_segments} 个音频）", (cosyvoice.sample_rate, empty_audio), download_file_path
+                yield f"生成已停止（已生成 {saved_count}/{total_segments} 个音频）", download_file_path
                 break
             
             if not tts_text or not tts_text.strip():
                 continue
             
-            yield f"正在生成第 {idx}/{total_segments} 个音频...", (cosyvoice.sample_rate, empty_audio), download_file_path
+            yield f"正在生成第 {idx}/{total_segments} 个音频...", download_file_path
             
             try:
                 current_speed = sample_speed_with_variation(speed, enable_unstable_effects)
@@ -446,20 +442,12 @@ def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dro
                             abs_path = audio_path.resolve()
                             logging.info(f'成功保存音频: {abs_path} (大小: {audio_path.stat().st_size} 字节)')
                             
-                            # 转换为 float32 格式的 numpy 数组，确保值在 -1.0 到 1.0 之间
-                            audio_numpy = audio_data.squeeze().cpu().numpy().astype(np.float32)
-                            # 确保值在有效范围内
-                            if audio_numpy.max() > 1.0 or audio_numpy.min() < -1.0:
-                                audio_numpy = np.clip(audio_numpy, -1.0, 1.0)
-                            
-                            yield f"已生成第 {idx}/{total_segments} 个音频，保存到: {format_path_for_display(abs_path)}", (cosyvoice.sample_rate, audio_numpy), download_file_path
+                            yield f"已生成第 {idx}/{total_segments} 个音频，保存到: {format_path_for_display(abs_path)}", download_file_path
                             
                             # 每段生成完后清显存
-                            # 将张量移到CPU并删除
                             if audio_data.is_cuda:
                                 audio_data = audio_data.cpu()
                             del audio_data
-                            del audio_numpy
                             # 清空GPU缓存
                             if torch.cuda.is_available():
                                 torch.cuda.empty_cache()
@@ -472,7 +460,7 @@ def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dro
                             del audio_data
                             if torch.cuda.is_available():
                                 torch.cuda.empty_cache()
-                            yield error_msg, (cosyvoice.sample_rate, empty_audio), download_file_path
+                            yield error_msg, download_file_path
                     except Exception as save_error:
                         error_msg = f"保存音频文件时出错: {str(save_error)}"
                         logging.error(error_msg)
@@ -483,13 +471,14 @@ def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dro
                             del audio_data
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()
-                        yield f"第 {idx}/{total_segments} 个音频保存失败: {str(save_error)}", (cosyvoice.sample_rate, empty_audio), download_file_path
+                        yield f"第 {idx}/{total_segments} 个音频保存失败: {str(save_error)}", download_file_path
                 else:
-                    yield f"第 {idx}/{total_segments} 个音频生成失败", (cosyvoice.sample_rate, empty_audio), download_file_path
+                    yield f"第 {idx}/{total_segments} 个音频生成失败", download_file_path
                 
                 # 清理音频片段列表
                 del audio_chunks
-                del processed_chunks
+                if 'processed_chunks' in locals():
+                    del processed_chunks
                     
             except Exception as e:
                 logging.error(f'生成第 {idx} 个音频时出现错误: {e}')
@@ -502,7 +491,7 @@ def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dro
                     del audio_data
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-                yield f"第 {idx}/{total_segments} 个音频生成出错: {str(e)}", (cosyvoice.sample_rate, empty_audio), download_file_path
+                yield f"第 {idx}/{total_segments} 个音频生成出错: {str(e)}", download_file_path
         
         if not stop_generation.is_set():
             # 合并所有生成的音频文件
@@ -564,11 +553,11 @@ def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dro
                 final_msg = f"全部完成！共生成 {saved_count}/{total_segments} 个音频，保存目录: {display_path}"
             
             logging.info(final_msg)
-            yield final_msg, (cosyvoice.sample_rate, empty_audio), download_file_path
+            yield final_msg, download_file_path
             
     except Exception as e:
         logging.error(f'批量生成过程中出现错误: {e}')
-        yield f"批量生成出错: {str(e)}", (cosyvoice.sample_rate, empty_audio), download_file_path
+        yield f"批量生成出错: {str(e)}", download_file_path
     finally:
         # 清理当前任务的停止标志
         with task_stop_lock:
@@ -741,16 +730,15 @@ def main():
         # 目录选择
         output_dir = gr.Textbox(label="输出目录", value="./audios", interactive=True)
         unstable_speech = gr.Checkbox(
-            label="真人随机语气增强",
+            label="语气增强-测试",
             value=False,
-            info="开启后将自动加入语速波动、呼吸、环境噪声、随机停顿等效果"
+            info=""
         )
         
         with gr.Row():
             generate_button = gr.Button("开始生成", variant="primary")
             stop_button = gr.Button("停止生成", variant="stop")
 
-        audio_output = gr.Audio(label="合成音频预览", autoplay=True, streaming=True)
         status_text = gr.Textbox(label="状态", value="就绪", interactive=False)
         download_file = gr.File(label="合并音频下载", interactive=False)
 
@@ -800,19 +788,19 @@ def main():
             unstable_mode = args[110]
             
             # 调用批量生成函数
-            for status, audio, download_path in generate_batch_audio(
+            for status, download_path in generate_batch_audio(
                 text_segments, output_dir_path, mode_checkbox_group, sft_dropdown,
                 prompt_text, prompt_wav_upload, prompt_wav_record, instruct_text,
                 seed, stream, speed, enable_unstable_effects=unstable_mode
             ):
-                yield status, audio, download_path
+                yield status, download_path
         
         seed_button.click(generate_seed, inputs=[], outputs=seed)
         generate_button.click(
             batch_generate_wrapper,
             inputs=[*text_segments_list, output_dir, mode_checkbox_group, sft_dropdown, prompt_text, 
                    prompt_wav_upload, prompt_wav_record, instruct_text, seed, stream, speed, unstable_speech],
-            outputs=[status_text, audio_output, download_file]
+            outputs=[status_text, download_file]
         )
         stop_button.click(stop_generation_func, inputs=[], outputs=[status_text])
         mode_checkbox_group.change(fn=change_instruction, inputs=[mode_checkbox_group], outputs=[instruction_text])
