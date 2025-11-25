@@ -241,7 +241,7 @@ def add_environment_noise(waveform):
     """添加轻微环境噪声"""
     if waveform.numel() == 0:
         return waveform
-    noise_level = random.uniform(0.04, 0.08)
+    noise_level = random.uniform(0.08, 0.2)
     env_noise = torch.randn_like(waveform) * 0.02
     mixed = waveform * (1 - noise_level) + env_noise * noise_level
     max_val = mixed.abs().max()
