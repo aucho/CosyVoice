@@ -273,7 +273,10 @@ def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dro
         task_stop_flags[task_id] = task_stop_event
     
     if not text_segments or len(text_segments) == 0:
-        yield "没有文本需要生成", None
+        try:
+            yield "没有文本需要生成", None
+        except (ConnectionError, BrokenPipeError, OSError):
+            logging.warning("客户端断开连接")
         with task_stop_lock:
             task_stop_flags.pop(task_id, None)
         return
@@ -314,11 +317,17 @@ def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dro
         save_dir.mkdir(parents=True, exist_ok=True)
         logging.info(f'创建保存目录: {save_dir}')
         display_path = format_path_for_display(save_dir.resolve())
-        yield f"保存目录已创建: {display_path}", None
+        try:
+            yield f"保存目录已创建: {display_path}", None
+        except (ConnectionError, BrokenPipeError, OSError):
+            logging.warning("客户端断开连接，但继续创建目录")
     except Exception as e:
         error_msg = f"无法创建保存目录 {save_dir}: {str(e)}"
         logging.error(error_msg)
-        yield error_msg, None
+        try:
+            yield error_msg, None
+        except (ConnectionError, BrokenPipeError, OSError):
+            logging.warning("客户端断开连接")
         return
     
     total_segments = len(text_segments)
@@ -343,13 +352,19 @@ def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dro
         for idx, tts_text in enumerate(text_segments, 1):
             # 检查全局停止标志或当前任务停止标志
             if stop_generation.is_set() or task_stop_event.is_set():
-                yield f"生成已停止（已生成 {saved_count}/{total_segments} 个音频）", download_file_path
+                try:
+                    yield f"生成已停止（已生成 {saved_count}/{total_segments} 个音频）", download_file_path
+                except (ConnectionError, BrokenPipeError, OSError):
+                    logging.warning("客户端断开连接，但任务已停止")
                 break
             
             if not tts_text or not tts_text.strip():
                 continue
             
-            yield f"正在生成第 {idx}/{total_segments} 个音频...", download_file_path
+            try:
+                yield f"正在生成第 {idx}/{total_segments} 个音频...", download_file_path
+            except (ConnectionError, BrokenPipeError, OSError):
+                logging.warning(f"客户端断开连接，但继续生成第 {idx}/{total_segments} 个音频...")
             
             try:
                 current_speed = sample_speed_with_variation(speed, enable_unstable_effects)
@@ -442,7 +457,10 @@ def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dro
                             abs_path = audio_path.resolve()
                             logging.info(f'成功保存音频: {abs_path} (大小: {audio_path.stat().st_size} 字节)')
                             
-                            yield f"已生成第 {idx}/{total_segments} 个音频，保存到: {format_path_for_display(abs_path)}", download_file_path
+                            try:
+                                yield f"已生成第 {idx}/{total_segments} 个音频，保存到: {format_path_for_display(abs_path)}", download_file_path
+                            except (ConnectionError, BrokenPipeError, OSError):
+                                logging.warning(f"客户端断开连接，但第 {idx} 个音频已成功保存")
                             
                             # 每段生成完后清显存
                             if audio_data.is_cuda:
@@ -460,7 +478,10 @@ def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dro
                             del audio_data
                             if torch.cuda.is_available():
                                 torch.cuda.empty_cache()
-                            yield error_msg, download_file_path
+                            try:
+                                yield error_msg, download_file_path
+                            except (ConnectionError, BrokenPipeError, OSError):
+                                logging.warning(f"客户端断开连接，但继续处理下一个音频")
                     except Exception as save_error:
                         error_msg = f"保存音频文件时出错: {str(save_error)}"
                         logging.error(error_msg)
@@ -471,9 +492,15 @@ def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dro
                             del audio_data
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()
-                        yield f"第 {idx}/{total_segments} 个音频保存失败: {str(save_error)}", download_file_path
+                        try:
+                            yield f"第 {idx}/{total_segments} 个音频保存失败: {str(save_error)}", download_file_path
+                        except (ConnectionError, BrokenPipeError, OSError):
+                            logging.warning(f"客户端断开连接，但继续处理下一个音频")
                 else:
-                    yield f"第 {idx}/{total_segments} 个音频生成失败", download_file_path
+                    try:
+                        yield f"第 {idx}/{total_segments} 个音频生成失败", download_file_path
+                    except (ConnectionError, BrokenPipeError, OSError):
+                        logging.warning(f"客户端断开连接，但继续处理下一个音频")
                 
                 # 清理音频片段列表
                 del audio_chunks
@@ -491,7 +518,10 @@ def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dro
                     del audio_data
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-                yield f"第 {idx}/{total_segments} 个音频生成出错: {str(e)}", download_file_path
+                try:
+                    yield f"第 {idx}/{total_segments} 个音频生成出错: {str(e)}", download_file_path
+                except (ConnectionError, BrokenPipeError, OSError):
+                    logging.warning(f"客户端断开连接，但继续处理下一个音频")
         
         if not stop_generation.is_set():
             # 合并所有生成的音频文件
@@ -553,11 +583,17 @@ def generate_batch_audio(text_segments, output_dir, mode_checkbox_group, sft_dro
                 final_msg = f"全部完成！共生成 {saved_count}/{total_segments} 个音频，保存目录: {display_path}"
             
             logging.info(final_msg)
-            yield final_msg, download_file_path
+            try:
+                yield final_msg, download_file_path
+            except (ConnectionError, BrokenPipeError, OSError):
+                logging.warning("客户端断开连接，但批量生成任务已完成")
             
     except Exception as e:
         logging.error(f'批量生成过程中出现错误: {e}')
-        yield f"批量生成出错: {str(e)}", download_file_path
+        try:
+            yield f"批量生成出错: {str(e)}", download_file_path
+        except (ConnectionError, BrokenPipeError, OSError):
+            logging.warning("客户端断开连接，但错误已记录")
     finally:
         # 清理当前任务的停止标志
         with task_stop_lock:
