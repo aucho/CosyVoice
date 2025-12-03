@@ -245,13 +245,27 @@ def split_paragraph(text: str, tokenize, lang="zh", token_max_n=80, token_min_n=
     final_utts = []
     cur_utt = ""
     for utt in utts:
-        if calc_utt_length(cur_utt + utt) > token_max_n and calc_utt_length(cur_utt) > token_min_n:
+        combined_length = calc_utt_length(cur_utt + utt)
+        cur_length = calc_utt_length(cur_utt)
+        # 如果合并后会明显超长（超过1.5倍），即使cur_utt很小也要分割
+        if combined_length > token_max_n * 1.5:
+            if cur_length > 0:
+                final_utts.append(cur_utt)
+            cur_utt = utt
+        # 如果合并后超过token_max_n且cur_utt已达到最小长度，则分割
+        elif combined_length > token_max_n and cur_length > token_min_n:
             final_utts.append(cur_utt)
-            cur_utt = ""
-        cur_utt = cur_utt + utt
+            cur_utt = utt
+        else:
+            cur_utt = cur_utt + utt
     if len(cur_utt) > 0:
         if should_merge(cur_utt) and len(final_utts) != 0:
-            final_utts[-1] = final_utts[-1] + cur_utt
+            # 检查合并后是否会明显超长，如果会则不再合并
+            merged_length = calc_utt_length(final_utts[-1] + cur_utt)
+            if merged_length <= token_max_n * 1.5:
+                final_utts[-1] = final_utts[-1] + cur_utt
+            else:
+                final_utts.append(cur_utt)
         else:
             final_utts.append(cur_utt)
 
