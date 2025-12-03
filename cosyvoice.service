@@ -1,0 +1,36 @@
+[Unit]
+Description=CosyVoice API Service
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cosyvoice
+Group=cosyvoice
+WorkingDirectory=/opt/cosyvoice
+Environment="PYTHONPATH=/opt/cosyvoice:/opt/cosyvoice/third_party/Matcha-TTS"
+Environment="CUDA_VISIBLE_DEVICES=0"
+
+ExecStart=/bin/bash -c 'source /opt/conda/etc/profile.d/conda.sh && conda activate cosyvoice && python3 /opt/cosyvoice/runtime/python/fastapi/server_enhanced.py --port 9999 --model_dir /opt/cosyvoice/pretrained_models/CosyVoice2-0.5B --fp16 --load_jit --load_trt --trt_concurrent 2'
+
+# 重启策略
+Restart=always
+RestartSec=10
+StartLimitInterval=300
+StartLimitBurst=5
+
+# 日志配置
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cosyvoice-api
+
+# 资源限制（根据需要调整）
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# 安全设置
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
