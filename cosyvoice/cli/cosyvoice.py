@@ -13,6 +13,7 @@
 # limitations under the License.
 import os
 import time
+import inspect
 from typing import Generator
 from tqdm import tqdm
 from hyperpyyaml import load_hyperpyyaml
@@ -90,6 +91,51 @@ class CosyVoice:
                 start_time = time.time()
 
     def inference_zero_shot(self, tts_text, prompt_text, prompt_speech_16k, zero_shot_spk_id='', stream=False, speed=1.0, text_frontend=True):
+        # 获取调用来源信息
+        frame = inspect.currentframe()
+        caller_frame = frame.f_back
+        caller_info = inspect.getframeinfo(caller_frame)
+        caller_filename = os.path.basename(caller_info.filename)
+        caller_line = caller_info.lineno
+        
+        # 确定调用来源
+        if 'webui.py' in caller_info.filename:
+            source = 'webui.py'
+        elif 'generator.py' in caller_info.filename:
+            source = 'generator.py'
+        else:
+            source = caller_filename
+        
+        # 打印参数信息
+        logging.info('=' * 80)
+        logging.info(f'[inference_zero_shot] 调用来源: {source} (行号: {caller_line})')
+        logging.info(f'[inference_zero_shot] 参数信息:')
+        logging.info(f'  - tts_text: {tts_text[:100]}{"..." if len(tts_text) > 100 else ""} (长度: {len(tts_text)})')
+        logging.info(f'  - prompt_text: {prompt_text[:100]}{"..." if len(prompt_text) > 100 else ""} (长度: {len(prompt_text)})')
+        
+        # 打印 prompt_speech_16k 的详细信息
+        if hasattr(prompt_speech_16k, "shape"):
+            shape_str = str(prompt_speech_16k.shape)
+            dtype_str = str(prompt_speech_16k.dtype) if hasattr(prompt_speech_16k, "dtype") else "N/A"
+            logging.info(f'  - prompt_speech_16k: type={type(prompt_speech_16k).__name__}, shape={shape_str}, dtype={dtype_str}')
+            if len(prompt_speech_16k.shape) >= 1:
+                total_samples = prompt_speech_16k.shape[-1]
+                logging.info(f'    总采样点数: {total_samples} (约 {total_samples / self.sample_rate:.2f} 秒)')
+            if len(prompt_speech_16k.shape) >= 2:
+                channels = prompt_speech_16k.shape[0]
+                logging.info(f'    通道数: {channels}')
+            if hasattr(prompt_speech_16k, "min") and hasattr(prompt_speech_16k, "max"):
+                logging.info(f'    数值范围: min={prompt_speech_16k.min().item():.6f}, max={prompt_speech_16k.max().item():.6f}')
+        else:
+            logging.info(f'  - prompt_speech_16k: type={type(prompt_speech_16k).__name__}, 无shape属性')
+        
+        logging.info(f'  - zero_shot_spk_id: "{zero_shot_spk_id}"')
+        logging.info(f'  - stream: {stream}')
+        logging.info(f'  - speed: {speed}')
+        logging.info(f'  - text_frontend: {text_frontend}')
+        logging.info(f'  - sample_rate: {self.sample_rate}')
+        logging.info('=' * 80)
+        
         prompt_text = self.frontend.text_normalize(prompt_text, split=False, text_frontend=text_frontend)
         for i in tqdm(self.frontend.text_normalize(tts_text, split=True, text_frontend=text_frontend)):
             if (not isinstance(i, Generator)) and len(i) < 0.5 * len(prompt_text):
