@@ -321,12 +321,18 @@ class TransformerLM(torch.nn.Module):
         
         max_len = max(min_len + 50, base_max_len + max_len_redundancy)  # 确保 max_len 比 min_len 大足够多
         
+        # 计算安全缓冲区：在min_len之后还要继续强制生成一定数量的token，防止立即结束
+        # 安全缓冲区为min_len的20-30%，至少20个token
+        safety_buffer = max(20, int(min_len * 0.25))
+        eos_allowed_after = min_len + safety_buffer  # 在这个位置之后才允许EOS
+        
         # 记录冗余参数用于监控和优化
         logging.debug(
             f"Inference length params: actual_text_len={actual_text_len_value:.1f}, "
             f"base_min_len={base_min_len}, base_max_len={base_max_len}, "
             f"min_len={min_len}, max_len={max_len}, "
-            f"min_redundancy={min_len_redundancy}, max_redundancy={max_len_redundancy}"
+            f"min_redundancy={min_len_redundancy}, max_redundancy={max_len_redundancy}, "
+            f"safety_buffer={safety_buffer}, eos_allowed_after={eos_allowed_after}"
         )
 
         # 5. step by step decode
@@ -355,11 +361,12 @@ class TransformerLM(torch.nn.Module):
                 # force continue decode first token
                 if i == 0:
                     logp[:, self.speech_token_size] = -float("inf")
+                # 使用安全缓冲区：在eos_allowed_after之前强制忽略EOS
                 top_ids = self.sampling_ids(
                     logp.squeeze(dim=0),
                     out_tokens,
                     sampling,
-                    ignore_eos=True if i < min_len else False,
+                    ignore_eos=True if i < eos_allowed_after else False,
                 )
                 # 确保top_ids是整数类型再用于索引
                 lm_input = self.speech_embedding.weight[top_ids].reshape(1, 1, -1)
@@ -755,27 +762,35 @@ class Qwen2LM(TransformerLM):
         
         max_len = max(min_len + 50, base_max_len + max_len_redundancy)  # 确保 max_len 比 min_len 大足够多
         
+        # 计算安全缓冲区：在min_len之后还要继续强制生成一定数量的token，防止立即结束
+        # 安全缓冲区为min_len的20-30%，至少20个token
+        safety_buffer = max(20, int(min_len * 0.25))
+        eos_allowed_after = min_len + safety_buffer  # 在这个位置之后才允许EOS
+        
         # 记录冗余参数用于监控和优化
         logging.debug(
             f"Inference length params: actual_text_len={actual_text_len_value:.1f}, "
             f"base_min_len={base_min_len}, base_max_len={base_max_len}, "
             f"min_len={min_len}, max_len={max_len}, "
-            f"min_redundancy={min_len_redundancy}, max_redundancy={max_len_redundancy}"
+            f"min_redundancy={min_len_redundancy}, max_redundancy={max_len_redundancy}, "
+            f"safety_buffer={safety_buffer}, eos_allowed_after={eos_allowed_after}"
         )
 
         # 5. step by step decode
-        for token in self.inference_wrapper(lm_input, sampling, min_len, max_len, uuid):
+        # 将eos_allowed_after传递给inference_wrapper，用于控制EOS生成时机
+        for token in self.inference_wrapper(lm_input, sampling, min_len, eos_allowed_after, max_len, uuid):
             yield token
 
     @torch.inference_mode()
-    def inference_wrapper(self, lm_input, sampling, min_len, max_len, uuid):
+    def inference_wrapper(self, lm_input, sampling, min_len, eos_allowed_after, max_len, uuid):
         if hasattr(self, "vllm"):
             from vllm import SamplingParams, RequestOutput
 
+            # 对于vllm，使用eos_allowed_after作为min_tokens，确保在安全缓冲区之前不会结束
             sampling_params = SamplingParams(
                 top_k=sampling,
                 stop_token_ids=self.stop_token_ids,
-                min_tokens=min_len,
+                min_tokens=eos_allowed_after,  # 使用eos_allowed_after而不是min_len
                 max_tokens=max_len,
             )
             with self.lock:
@@ -827,11 +842,12 @@ class Qwen2LM(TransformerLM):
                 )
                 logp = self.llm_decoder(y_pred[:, -1]).log_softmax(dim=-1)
                 # 在inference方法中，确保top_ids是整数类型
+                # 使用eos_allowed_after而不是min_len，确保在安全缓冲区之前不会结束
                 top_ids = self.sampling_ids(
                     logp.squeeze(dim=0),
                     out_tokens,
                     sampling,
-                    ignore_eos=True if i < min_len else False,
+                    ignore_eos=True if i < eos_allowed_after else False,
                 )
                 if isinstance(top_ids, torch.Tensor):
                     top_ids = top_ids.item()
