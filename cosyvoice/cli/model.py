@@ -18,7 +18,6 @@ import torch
 import numpy as np
 import threading
 import time
-import logging
 from torch.nn import functional as F
 from contextlib import nullcontext
 import uuid
@@ -104,37 +103,27 @@ class CosyVoiceModel:
         return {'min_shape': min_shape, 'opt_shape': opt_shape, 'max_shape': max_shape, 'input_names': input_names}
 
     def llm_job(self, text, prompt_text, llm_prompt_speech_token, llm_embedding, uuid):
-        try:
-            with self.llm_context, torch.cuda.amp.autocast(self.fp16 is True and hasattr(self.llm, 'vllm') is False):
-                token_count = 0
-                if isinstance(text, Generator):
-                    assert isinstance(self, CosyVoice2Model) and not hasattr(self.llm, 'vllm'), 'streaming input text is only implemented for CosyVoice2 and do not support vllm!'
-                    for i in self.llm.inference_bistream(text=text,
-                                                         prompt_text=prompt_text.to(self.device),
-                                                         prompt_text_len=torch.tensor([prompt_text.shape[1]], dtype=torch.int32).to(self.device),
-                                                         prompt_speech_token=llm_prompt_speech_token.to(self.device),
-                                                         prompt_speech_token_len=torch.tensor([llm_prompt_speech_token.shape[1]], dtype=torch.int32).to(self.device),
-                                                         embedding=llm_embedding.to(self.device)):
-                        self.tts_speech_token_dict[uuid].append(i)
-                        token_count += 1
-                else:
-                    for i in self.llm.inference(text=text.to(self.device),
-                                                text_len=torch.tensor([text.shape[1]], dtype=torch.int32).to(self.device),
-                                                prompt_text=prompt_text.to(self.device),
-                                                prompt_text_len=torch.tensor([prompt_text.shape[1]], dtype=torch.int32).to(self.device),
-                                                prompt_speech_token=llm_prompt_speech_token.to(self.device),
-                                                prompt_speech_token_len=torch.tensor([llm_prompt_speech_token.shape[1]], dtype=torch.int32).to(self.device),
-                                                embedding=llm_embedding.to(self.device),
-                                                uuid=uuid):
-                        self.tts_speech_token_dict[uuid].append(i)
-                        token_count += 1
-                logging.debug(f'llm_job completed: generated {token_count} tokens for uuid={uuid}')
-        except Exception as e:
-            logging.error(f'llm_job failed for uuid={uuid}: {e}', exc_info=True)
-            # 即使出错也要设置结束标志，避免主线程无限等待
-        finally:
-            self.llm_end_dict[uuid] = True
-            logging.debug(f'llm_job finished: final token count={len(self.tts_speech_token_dict.get(uuid, []))} for uuid={uuid}')
+        with self.llm_context, torch.cuda.amp.autocast(self.fp16 is True and hasattr(self.llm, 'vllm') is False):
+            if isinstance(text, Generator):
+                assert isinstance(self, CosyVoice2Model) and not hasattr(self.llm, 'vllm'), 'streaming input text is only implemented for CosyVoice2 and do not support vllm!'
+                for i in self.llm.inference_bistream(text=text,
+                                                     prompt_text=prompt_text.to(self.device),
+                                                     prompt_text_len=torch.tensor([prompt_text.shape[1]], dtype=torch.int32).to(self.device),
+                                                     prompt_speech_token=llm_prompt_speech_token.to(self.device),
+                                                     prompt_speech_token_len=torch.tensor([llm_prompt_speech_token.shape[1]], dtype=torch.int32).to(self.device),
+                                                     embedding=llm_embedding.to(self.device)):
+                    self.tts_speech_token_dict[uuid].append(i)
+            else:
+                for i in self.llm.inference(text=text.to(self.device),
+                                            text_len=torch.tensor([text.shape[1]], dtype=torch.int32).to(self.device),
+                                            prompt_text=prompt_text.to(self.device),
+                                            prompt_text_len=torch.tensor([prompt_text.shape[1]], dtype=torch.int32).to(self.device),
+                                            prompt_speech_token=llm_prompt_speech_token.to(self.device),
+                                            prompt_speech_token_len=torch.tensor([llm_prompt_speech_token.shape[1]], dtype=torch.int32).to(self.device),
+                                            embedding=llm_embedding.to(self.device),
+                                            uuid=uuid):
+                    self.tts_speech_token_dict[uuid].append(i)
+        self.llm_end_dict[uuid] = True
 
     def vc_job(self, source_speech_token, uuid):
         self.tts_speech_token_dict[uuid] = source_speech_token.flatten().tolist()
