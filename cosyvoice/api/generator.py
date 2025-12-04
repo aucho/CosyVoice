@@ -37,7 +37,7 @@ max_val = 0.8
 prompt_sr = 16000
 
 
-def postprocess(speech, sample_rate=16000, top_db=60, hop_length=220, win_length=440):
+def postprocess(speech, sample_rate=None, top_db=60, hop_length=220, win_length=440):
     """音频后处理：去除静音、归一化、添加尾部静音"""
     speech, _ = librosa.effects.trim(
         speech, top_db=top_db,
@@ -46,6 +46,9 @@ def postprocess(speech, sample_rate=16000, top_db=60, hop_length=220, win_length
     )
     if speech.abs().max() > max_val:
         speech = speech / speech.abs().max() * max_val
+    # 如果没有提供 sample_rate，使用默认值 16000（与 webui.py 中 cosyvoice.sample_rate 的常见值一致）
+    if sample_rate is None:
+        sample_rate = 16000
     speech = torch.concat([speech, torch.zeros(1, int(sample_rate * 0.2))], dim=1)
     return speech
 
@@ -116,7 +119,7 @@ def add_environment_noise(waveform):
     """添加轻微环境噪声"""
     if waveform.numel() == 0:
         return waveform
-    noise_level = random.uniform(0.1, 0.3)
+    noise_level = random.uniform(0.08, 0.2)  # 与 webui.py 保持一致
     env_noise = torch.randn_like(waveform) * 0.02
     mixed = waveform * (1 - noise_level) + env_noise * noise_level
     max_val = mixed.abs().max()
@@ -195,7 +198,8 @@ class AudioGenerator:
             prompt_speech_16k = None
             if prompt_wav is not None:
                 if isinstance(prompt_wav, str):
-                    prompt_speech_16k = postprocess(load_wav(prompt_wav, prompt_sr), sample_rate=prompt_sr)
+                    # 与 webui.py 保持一致，使用 self.sample_rate 而不是 prompt_sr
+                    prompt_speech_16k = postprocess(load_wav(prompt_wav, prompt_sr), sample_rate=self.sample_rate)
                 elif isinstance(prompt_wav, bytes):
                     # 处理字节数据（需要先保存为临时文件或使用其他方法）
                     import tempfile
@@ -203,15 +207,15 @@ class AudioGenerator:
                         tmp_file.write(prompt_wav)
                         tmp_path = tmp_file.name
                     try:
-                        prompt_speech_16k = postprocess(load_wav(tmp_path, prompt_sr), sample_rate=prompt_sr)
+                        # 与 webui.py 保持一致，使用 self.sample_rate 而不是 prompt_sr
+                        prompt_speech_16k = postprocess(load_wav(tmp_path, prompt_sr), sample_rate=self.sample_rate)
                     finally:
                         os.unlink(tmp_path)
-            
-            set_all_random_seed(seed)
             
             # 根据模式调用不同的推理方法
             if mode == '预训练音色':
                 logging.info('get sft inference request')
+                set_all_random_seed(seed)  # 与 webui.py 保持一致，在每个模式分支内设置
                 for i in self.cosyvoice.inference_sft(tts_text, sft_dropdown, stream=stream, speed=speed):
                     if task_stop_event.is_set():
                         logging.info('生成被用户停止')
@@ -227,6 +231,7 @@ class AudioGenerator:
                 logging.info('get zero_shot inference request')
                 if prompt_speech_16k is None:
                     raise ValueError('3s极速复刻模式需要提供prompt音频')
+                set_all_random_seed(seed)  # 与 webui.py 保持一致，在每个模式分支内设置
                 for i in self.cosyvoice.inference_zero_shot(tts_text, prompt_text, prompt_speech_16k, stream=stream, speed=speed):
                     if task_stop_event.is_set():
                         logging.info('生成被用户停止')
@@ -242,6 +247,7 @@ class AudioGenerator:
                 logging.info('get cross_lingual inference request')
                 if prompt_speech_16k is None:
                     raise ValueError('跨语种复刻模式需要提供prompt音频')
+                set_all_random_seed(seed)  # 与 webui.py 保持一致，在每个模式分支内设置
                 for i in self.cosyvoice.inference_cross_lingual(tts_text, prompt_speech_16k, stream=stream, speed=speed):
                     if task_stop_event.is_set():
                         logging.info('生成被用户停止')
@@ -255,6 +261,7 @@ class AudioGenerator:
                     
             else:  # 自然语言控制
                 logging.info('get instruct inference request')
+                set_all_random_seed(seed)  # 与 webui.py 保持一致，在每个模式分支内设置
                 for i in self.cosyvoice.inference_instruct(tts_text, sft_dropdown, instruct_text, stream=stream, speed=speed):
                     if task_stop_event.is_set():
                         logging.info('生成被用户停止')
@@ -362,14 +369,16 @@ class AudioGenerator:
         prompt_speech_16k = None
         if prompt_wav is not None:
             if isinstance(prompt_wav, str):
-                prompt_speech_16k = postprocess(load_wav(prompt_wav, prompt_sr), sample_rate=prompt_sr)
+                # 与 webui.py 保持一致，使用 self.sample_rate 而不是 prompt_sr
+                prompt_speech_16k = postprocess(load_wav(prompt_wav, prompt_sr), sample_rate=self.sample_rate)
             elif isinstance(prompt_wav, bytes):
                 import tempfile
                 with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
                     tmp_file.write(prompt_wav)
                     tmp_path = tmp_file.name
                 try:
-                    prompt_speech_16k = postprocess(load_wav(tmp_path, prompt_sr), sample_rate=prompt_sr)
+                    # 与 webui.py 保持一致，使用 self.sample_rate 而不是 prompt_sr
+                    prompt_speech_16k = postprocess(load_wav(tmp_path, prompt_sr), sample_rate=self.sample_rate)
                 finally:
                     os.unlink(tmp_path)
         
@@ -393,25 +402,27 @@ class AudioGenerator:
                     audio_data = None
                     audio_chunks = []
                     
-                    set_all_random_seed(seed)
-                    
                     if mode == '预训练音色':
+                        set_all_random_seed(seed)  # 与 webui.py 保持一致，在每个模式分支内设置
                         for i in self.cosyvoice.inference_sft(tts_text, sft_dropdown, stream=False, speed=current_speed):
                             if 'tts_speech' in i:
                                 audio_chunks.append(i['tts_speech'])
                     elif mode == '3s极速复刻':
                         if prompt_speech_16k is None:
                             continue
+                        set_all_random_seed(seed)  # 与 webui.py 保持一致，在每个模式分支内设置
                         for i in self.cosyvoice.inference_zero_shot(tts_text, prompt_text, prompt_speech_16k, stream=False, speed=current_speed):
                             if 'tts_speech' in i:
                                 audio_chunks.append(i['tts_speech'])
                     elif mode == '跨语种复刻':
                         if prompt_speech_16k is None:
                             continue
+                        set_all_random_seed(seed)  # 与 webui.py 保持一致，在每个模式分支内设置
                         for i in self.cosyvoice.inference_cross_lingual(tts_text, prompt_speech_16k, stream=False, speed=current_speed):
                             if 'tts_speech' in i:
                                 audio_chunks.append(i['tts_speech'])
                     else:  # 自然语言控制
+                        set_all_random_seed(seed)  # 与 webui.py 保持一致，在每个模式分支内设置
                         for i in self.cosyvoice.inference_instruct(tts_text, sft_dropdown, instruct_text, stream=False, speed=current_speed):
                             if 'tts_speech' in i:
                                 audio_chunks.append(i['tts_speech'])
