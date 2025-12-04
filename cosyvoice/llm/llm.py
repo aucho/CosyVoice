@@ -373,6 +373,9 @@ class TransformerLM(torch.nn.Module):
                 if top_ids == self.speech_token_size:
                     break
                 # in stream mode, yield token one by one
+                # 记录每个生成的token，用于调试中间漏读问题
+                if i % 50 == 0:  # 每50个token记录一次
+                    logging.debug(f'Generated token {i}: top_ids={top_ids}, out_tokens_len={len(out_tokens)}')
                 yield top_ids
                 out_tokens.append(top_ids)
                 offset += lm_input.size(1)

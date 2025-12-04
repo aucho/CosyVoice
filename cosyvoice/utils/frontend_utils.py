@@ -187,14 +187,29 @@ def split_paragraph(text: str, tokenize, lang="zh", token_max_n=80, token_min_n=
     utts = []
     for i, c in enumerate(text):
         if c in pounc:
-            if len(text[st: i]) > 0:
-                utts.append(text[st: i] + c)
-            if i + 1 < len(text) and text[i + 1] in ['"', '”']:
-                tmp = utts.pop(-1)
-                utts.append(tmp + text[i + 1])
-                st = i + 2
-            else:
+            # 修复：确保即使连续标点也不会丢失内容
+            segment_text = text[st: i]
+            if len(segment_text) > 0:
+                utts.append(segment_text + c)
                 st = i + 1
+            elif len(utts) > 0:
+                # 如果当前段为空（连续标点），将标点追加到上一个段
+                utts[-1] = utts[-1] + c
+                st = i + 1
+            else:
+                # 如果这是第一个标点且前面没有内容，至少保留标点
+                utts.append(c)
+                st = i + 1
+            # 处理引号
+            if i + 1 < len(text) and text[i + 1] in ['"', '”']:
+                if len(utts) > 0:
+                    tmp = utts.pop(-1)
+                    utts.append(tmp + text[i + 1])
+                    st = i + 2
+                else:
+                    # 如果utts为空，直接添加引号
+                    utts.append(text[i + 1])
+                    st = i + 2
 
     # 如果没有标点符号，需要按长度强制分割
     if not has_punctuation and len(utts) == 1:
