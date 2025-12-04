@@ -832,6 +832,7 @@ class Qwen2LM(TransformerLM):
         else:
             out_tokens = []
             cache = None
+            last_valid_lm_input = None  # 保存上一次有效的lm_input
             for i in range(max_len):
                 y_pred, cache = self.llm.forward_one_step(
                     lm_input,
@@ -856,16 +857,25 @@ class Qwen2LM(TransformerLM):
                     top_ids = top_ids.item()
                 top_ids = int(top_ids)
 
-                # 确保top_ids是整数类型再用于索引
-                lm_input = self.speech_embedding.weight[top_ids].reshape(1, 1, -1)
+                # 检查EOS和无效token，在更新lm_input之前
                 if top_ids == self.speech_token_size:
                     break
                 if top_ids > self.speech_token_size:
+                    # 无效token：记录警告，使用上一次有效的lm_input继续生成
+                    logging.warning(f'Invalid token {top_ids} > speech_token_size {self.speech_token_size} at step {i}, using last valid lm_input')
+                    if last_valid_lm_input is not None:
+                        lm_input = last_valid_lm_input
+                    # 跳过这个无效token，不yield也不append
                     continue
+                
+                # 确保top_ids是整数类型再用于索引
+                new_lm_input = self.speech_embedding.weight[top_ids].reshape(1, 1, -1)
+                # 保存有效的lm_input
+                last_valid_lm_input = new_lm_input
+                lm_input = new_lm_input
                 # in stream mode, yield token one by one
                 yield top_ids
                 out_tokens.append(top_ids)
-                lm_input = self.speech_embedding.weight[top_ids].reshape(1, 1, -1)
 
     @torch.inference_mode()
     def inference_bistream(
