@@ -37,21 +37,12 @@ from pydub import AudioSegment
 
 logging.getLogger("matplotlib").setLevel(logging.WARNING)
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-# 添加项目根目录到 Python 路径
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(ROOT_DIR)))
-sys.path.append(project_root)
+# 添加项目根目录到 Python 路径（参考 server.py 的实现方式）
+sys.path.append('{}/../../..'.format(ROOT_DIR))
+sys.path.append('{}/../../../third_party/Matcha-TTS'.format(ROOT_DIR))
 
-# 添加 Matcha-TTS 第三方模块路径（CosyVoice2 需要）
-matcha_tts_path = os.path.join(project_root, "third_party", "Matcha-TTS")
-if os.path.exists(matcha_tts_path):
-    sys.path.append(matcha_tts_path)
-    logging.debug(f"已添加 Matcha-TTS 路径: {matcha_tts_path}")
-else:
-    logging.warning(f"Matcha-TTS 模块路径不存在: {matcha_tts_path}")
-    logging.warning(
-        "如果遇到 'No module named matcha' 错误，请执行以下命令初始化 git submodule:"
-    )
-    logging.warning("  git submodule update --init --recursive")
+# 计算项目根目录供后续使用
+project_root = os.path.abspath('{}/../../..'.format(ROOT_DIR))
 
 from cosyvoice.cli.cosyvoice import CosyVoice, CosyVoice2
 from cosyvoice.api.generator import AudioGenerator
@@ -110,67 +101,6 @@ task_status_lock = threading.Lock()
 task_executor = ThreadPoolExecutor(max_workers=5)  # 最大并发任务数
 temp_output_dir = os.path.join(tempfile.gettempdir(), "cosyvoice_async_results")
 os.makedirs(temp_output_dir, exist_ok=True)
-
-# 持久化文件路径
-task_status_file = os.path.join(project_root, "task_status.json")
-
-
-def save_task_status():
-    """保存任务状态到文件"""
-    try:
-        with task_status_lock:
-            # 只保存已完成或失败的任务（包含下载地址的）
-            status_to_save = {}
-            for step_id, info in task_status.items():
-                if info.get("status") in ["completed", "failed"] and info.get(
-                    "result_path"
-                ):
-                    status_to_save[step_id] = {
-                        "status": info["status"],
-                        "result_path": info["result_path"],
-                        "error": info.get("error"),
-                        "created_at": info.get("created_at"),
-                        "updated_at": info.get("updated_at"),
-                    }
-
-            with open(task_status_file, "w", encoding="utf-8") as f:
-                json.dump(status_to_save, f, ensure_ascii=False, indent=2)
-            logging.debug(f"任务状态已保存到: {task_status_file}")
-    except Exception as e:
-        logging.warning(f"保存任务状态失败: {e}")
-
-
-def load_task_status():
-    """从文件加载任务状态"""
-    global task_status
-    if not os.path.exists(task_status_file):
-        logging.info(f"任务状态文件不存在: {task_status_file}，使用空状态")
-        return
-
-    try:
-        with open(task_status_file, "r", encoding="utf-8") as f:
-            loaded_status = json.load(f)
-
-        # 验证文件中的路径是否仍然存在
-        valid_status = {}
-        for step_id, info in loaded_status.items():
-            result_path = info.get("result_path")
-            if result_path and os.path.exists(result_path):
-                valid_status[step_id] = info
-            else:
-                logging.debug(
-                    f"任务 {step_id} 的结果文件不存在，跳过加载: {result_path}"
-                )
-
-        with task_status_lock:
-            task_status.update(valid_status)
-
-        logging.info(f"从文件加载了 {len(valid_status)} 个任务状态")
-    except json.JSONDecodeError as e:
-        logging.warning(f"任务状态文件格式错误: {e}，使用空状态")
-    except Exception as e:
-        logging.warning(f"加载任务状态失败: {e}，使用空状态")
-
 
 # 持久化文件路径
 task_status_file = os.path.join(project_root, "task_status.json")
@@ -292,11 +222,7 @@ async def init_model(
                     "No module named 'matcha'" in error_detail
                     or "ModuleNotFoundError" in str(type(e2).__name__)
                 ):
-                    # 计算项目根目录
-                    current_file = os.path.abspath(__file__)
-                    project_root = os.path.dirname(
-                        os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
-                    )
+                    # 使用全局的 project_root 变量
                     matcha_tts_path = os.path.join(
                         project_root, "third_party", "Matcha-TTS"
                     )
@@ -807,10 +733,7 @@ async def health_check():
 
 
 if __name__ == "__main__":
-    # 获取项目根目录（从 runtime/python/fastapi 向上三级）
-    project_root = os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    )
+    # 使用文件开头已计算的项目根目录
     default_model_dir = os.path.join(
         project_root, "pretrained_models", "CosyVoice2-0.5B"
     )
