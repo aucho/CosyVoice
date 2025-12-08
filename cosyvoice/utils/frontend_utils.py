@@ -163,7 +163,7 @@ def split_paragraph(text: str, tokenize, lang="zh", token_max_n=80, token_min_n=
             if idx == len(pieces) - 1:
                 current_punc = tail_punc if tail_punc else default_split_punc
             else:
-                current_punc = default_split_punc
+                current_punc = ''
             result.append(piece + current_punc)
         return result
 
@@ -182,7 +182,7 @@ def split_paragraph(text: str, tokenize, lang="zh", token_max_n=80, token_min_n=
             text = original_text + "."
     else:
         text = original_text
-
+    text = original_text
     st = 0
     utts = []
     for i, c in enumerate(text):
@@ -213,7 +213,10 @@ def split_paragraph(text: str, tokenize, lang="zh", token_max_n=80, token_min_n=
 
     # 如果没有标点符号，需要按长度强制分割
     if not has_punctuation and len(utts) == 1:
-        original_text = utts[0][:-1]  # 去掉添加的句号
+        original_text = utts[0]
+        # 如果utts[0]末尾有标点（可能是之前添加的），去掉它
+        if original_text and original_text[-1] in pounc:
+            original_text = original_text[:-1]
         utts = []
         current_pos = 0
         
@@ -244,8 +247,16 @@ def split_paragraph(text: str, tokenize, lang="zh", token_max_n=80, token_min_n=
             # 防止无限循环
             if end_pos <= current_pos:
                 end_pos = current_pos + 1
-                
-            utts.append(original_text[current_pos:end_pos] + "。")
+            
+            # 获取分割的文本片段
+            segment = original_text[current_pos:end_pos]
+
+            # 根据语言添加对应的标点符号
+            if lang == "zh":
+                segment += "。"
+            else:
+                segment += "."
+            utts.append(segment)
             current_pos = end_pos
 
     # 对于包含标点但仍然过长的语句，继续切分
